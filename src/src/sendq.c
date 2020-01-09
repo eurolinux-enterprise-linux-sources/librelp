@@ -1,6 +1,6 @@
 /* The relp sendqueue object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -33,6 +33,7 @@
 #include "config.h"
 #include <stdlib.h>
 #include <assert.h>
+#include <sys/types.h>
 #include "relp.h"
 #include "sendq.h"
 #include "dbllinklist.h"
@@ -219,7 +220,6 @@ relpSendqIsEmpty(relpSendq_t *pThis)
 	pthread_mutex_lock(&pThis->mut);
 	ret = pThis->pRoot == NULL;
 	pthread_mutex_unlock(&pThis->mut);
-pThis->pEngine->dbgprint("relpSendqIsEmpty() returns %d\n", ret);
 	return ret;
 }
 
@@ -243,6 +243,7 @@ relpSendqSend(relpSendq_t *pThis, relpTcp_t *pTcp)
 
 	pEntry = pThis->pRoot;
 
+	relpTcpHintBurstBegin(pTcp);
 	while(pEntry != NULL) {
 		RELPOBJ_assert(pEntry, Sendqe);
 		localRet = relpSendbufSend(pEntry->pBuf, pTcp);
@@ -258,5 +259,6 @@ relpSendqSend(relpSendq_t *pThis, relpTcp_t *pTcp)
 	}
 
 finalize_it:
+	relpTcpHintBurstEnd(pTcp);
 	LEAVE_RELPFUNC;
 }

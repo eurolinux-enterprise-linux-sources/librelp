@@ -1,6 +1,6 @@
 /* This module implements the relp sess object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -50,12 +50,22 @@ static relpRetVal relpSessCltDoDisconnect(relpSess_t *pThis);
 static relpRetVal relpSessFixCmdStates(relpSess_t *pThis);
 static relpRetVal relpSessSrvDoDisconnect(relpSess_t *pThis);
 
+/* helper to free permittedPeer structure */
+static inline void
+relpSessFreePermittedPeers(relpSess_t *pThis)
+{
+	int i;
+	for(i = 0 ; i < pThis->permittedPeers.nmemb ; ++i)
+		free(pThis->permittedPeers.name[i]);
+	pThis->permittedPeers.nmemb = 0;
+}
+
 
 /** Construct a RELP sess instance
  *  the pSrv parameter may be set to NULL if the session object is for a client.
  */
 relpRetVal
-relpSessConstruct(relpSess_t **ppThis, relpEngine_t *pEngine, relpSrv_t *pSrv)
+relpSessConstruct(relpSess_t **ppThis, relpEngine_t *pEngine, int connType, void *pParent)
 {
 	relpSess_t *pThis;
 
@@ -71,11 +81,22 @@ relpSessConstruct(relpSess_t **ppThis, relpEngine_t *pEngine, relpSrv_t *pSrv)
 	pThis->pEngine = pEngine;
 	/* use Engine's command enablement states as default */
 	pThis->stateCmdSyslog = pEngine->stateCmdSyslog;
-	pThis->pSrv = pSrv;
+	if(connType == RELP_SRV_CONN) {
+		pThis->pSrv = (relpSrv_t*) pParent;
+	} else {
+		pThis->pClt = (relpClt_t*) pParent;
+	}
 	pThis->txnr = 1; /* txnr start at 1 according to spec */
-	pThis->timeout = 10; /* TODO: make configurable */
-	pThis->sizeWindow = RELP_DFLT_WINDOW_SIZE; /* TODO: make configurable */
+	pThis->timeout = 90;
+	pThis->pUsr = NULL;
+	pThis->sizeWindow = RELP_DFLT_WINDOW_SIZE;
 	pThis->maxDataSize = RELP_DFLT_MAX_DATA_SIZE;
+	pThis->authmode = eRelpAuthMode_None;
+	pThis->pristring = NULL;
+	pThis->caCertFile = NULL;
+	pThis->ownCertFile = NULL;
+	pThis->privKeyFile = NULL;
+	pThis->permittedPeers.nmemb = 0;
 
 	CHKRet(relpSendqConstruct(&pThis->pSendq, pThis->pEngine));
 	pthread_mutex_init(&pThis->mutSend, NULL);
@@ -135,10 +156,13 @@ relpSessDestruct(relpSess_t **ppThis)
 		free(pUnackedToDel);
 	}
 
-	if(pThis->srvPort != NULL)
-		free(pThis->srvPort);
-	if(pThis->srvAddr != NULL)
-		free(pThis->srvAddr);
+	free(pThis->srvPort);
+	free(pThis->srvAddr);
+	free(pThis->clientIP);
+	free(pThis->pristring);
+	free(pThis->ownCertFile);
+	free(pThis->privKeyFile);
+	relpSessFreePermittedPeers(pThis);
 
 	pthread_mutex_destroy(&pThis->mutSend);
 	/* done with de-init work, now free object itself */
@@ -163,16 +187,14 @@ relpSessAcceptAndConstruct(relpSess_t **ppThis, relpSrv_t *pSrv, int sock)
 	RELPOBJ_assert(pSrv, Srv);
 	assert(sock >= 0);
 
-	CHKRet(relpSessConstruct(&pThis, pSrv->pEngine, pSrv));
-	CHKRet(relpTcpAcceptConnReq(&pThis->pTcp, sock, pThis->pEngine));
+	CHKRet(relpSessConstruct(&pThis, pSrv->pEngine, RELP_SRV_CONN, pSrv));
+	CHKRet(relpTcpAcceptConnReq(&pThis->pTcp, sock, pSrv));
 
-	/* TODO: check hostname against ACL (callback?) */
 	/* TODO: check against max# sessions */
 
 	*ppThis = pThis;
 
 finalize_it:
-pSrv->pEngine->dbgprint("relp session accepted with state %d\n", iRet);
 	if(iRet != RELP_RET_OK) {
 		if(pThis != NULL)
 			relpSessDestruct(&pThis);
@@ -191,18 +213,16 @@ pSrv->pEngine->dbgprint("relp session accepted with state %d\n", iRet);
 relpRetVal
 relpSessRcvData(relpSess_t *pThis)
 {
-	relpOctet_t rcvBuf[RELP_RCV_BUF_SIZE];
+	relpOctet_t rcvBuf[RELP_RCV_BUF_SIZE+1];
 	ssize_t lenBuf;
 	ssize_t i;
 
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Sess);
-memset(rcvBuf, 0, RELP_RCV_BUF_SIZE);
 
 	lenBuf = RELP_RCV_BUF_SIZE;
 	CHKRet(relpTcpRcv(pThis->pTcp, rcvBuf, &lenBuf));
 
-pThis->pEngine->dbgprint("relp session read %d octets, buf '%s'\n", (int) lenBuf, rcvBuf);
 	if(lenBuf == 0) {
 		pThis->pEngine->dbgprint("server closed relp session %p, session broken\n", pThis);
 		/* even though we had a "normal" close, it is unexpected at this
@@ -218,15 +238,17 @@ pThis->pEngine->dbgprint("relp session read %d octets, buf '%s'\n", (int) lenBuf
 			ABORT_FINALIZE(RELP_RET_SESSION_BROKEN);
 		}
 	} else {
+		/* Terminate buffer and output received data to debug*/
+		rcvBuf[lenBuf] = '\0';
+		pThis->pEngine->dbgprint("relp session read %d octets, buf '%s'\n", (int) lenBuf, rcvBuf);
+
 		/* we have regular data, which we now can process */
 		for(i = 0 ; i < lenBuf ; ++i) {
-//pThis->pEngine->dbgprint("lenbuf %d, i %d, c '%c', %2.2x\n", (int) lenBuf, (int) i, rcvBuf[i], rcvBuf[i]);
 			CHKRet(relpFrameProcessOctetRcvd(&pThis->pCurrRcvFrame, rcvBuf[i], pThis));
 		}
 	}
 
 finalize_it:
-//pThis->pEngine->dbgprint("end relpSessRcvData, iRet %d, session state %d\n", iRet, pThis->sessState);
 	LEAVE_RELPFUNC;
 }
 
@@ -289,7 +311,7 @@ static relpRetVal
 relpSessSrvSendHint(relpSess_t *pThis, unsigned char *pHint, size_t lenHint,
 		    unsigned char *pData, size_t lenData)
 {
-	relpSendbuf_t *pSendbuf;
+	relpSendbuf_t *pSendbuf = NULL;
 
 	ENTER_RELPFUNC;
 	assert(pHint != NULL);
@@ -298,10 +320,12 @@ relpSessSrvSendHint(relpSess_t *pThis, unsigned char *pHint, size_t lenHint,
 
 	CHKRet(relpFrameBuildSendbuf(&pSendbuf, 0, pHint, lenHint, pData, lenData, pThis, NULL));
 	/* now send it */
-pThis->pEngine->dbgprint("hint-frame to send: '%s'\n", pSendbuf->pData + (9 - pSendbuf->lenTxnr));
+	pThis->pEngine->dbgprint("hint-frame to send: '%s'\n", pSendbuf->pData + (9 - pSendbuf->lenTxnr));
 	CHKRet(relpSendbufSend(pSendbuf, pThis->pTcp));
 
 finalize_it:
+	if(pSendbuf != NULL)
+		relpSendbufDestruct(&pSendbuf);
 	LEAVE_RELPFUNC;
 }
 
@@ -367,7 +391,7 @@ relpSessAddUnacked(relpSess_t *pThis, relpSendbuf_t *pSendbuf)
 			pThis->pEngine->dbgprint("Warning: exceeding window size, max %d, curr %d\n",
 						 pThis->lenUnackedLst, pThis->sizeWindow);
 	}
-pThis->pEngine->dbgprint("ADD sess %p unacked %d, sessState %d\n", pThis, pThis->lenUnackedLst, pThis->sessState);
+	pThis->pEngine->dbgprint("ADD sess %p unacked %d, sessState %d\n", pThis, pThis->lenUnackedLst, pThis->sessState);
 
 finalize_it:
 	LEAVE_RELPFUNC;
@@ -400,7 +424,7 @@ relpSessDelUnacked(relpSess_t *pThis, relpSessUnacked_t *pUnackedLstEntry)
 
 	free(pUnackedLstEntry);
 
-pThis->pEngine->dbgprint("DEL sess %p unacked %d, sessState %d\n", pThis, pThis->lenUnackedLst, pThis->sessState);
+	pThis->pEngine->dbgprint("DEL sess %p unacked %d, sessState %d\n", pThis, pThis->lenUnackedLst, pThis->sessState);
 	LEAVE_RELPFUNC;
 }
 
@@ -462,6 +486,11 @@ relpSessWaitState(relpSess_t *pThis, relpSessState_t stateExpected, int timeout)
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Sess);
 
+	/* are we already ready? */
+	if(pThis->sessState == stateExpected || pThis->sessState == eRelpSessState_BROKEN) {
+		FINALIZE;
+	}
+
 	/* first read any outstanding data and process the packets. Note that this
 	 * call DOES NOT block.
 	 */
@@ -469,7 +498,7 @@ relpSessWaitState(relpSess_t *pThis, relpSessState_t stateExpected, int timeout)
 	if(localRet != RELP_RET_OK && localRet != RELP_RET_SESSION_BROKEN)
 		ABORT_FINALIZE(localRet);
 
-	/* check if we are already in the desired state. If so, we can immediately
+	/* re-check if we are already in the desired state. If so, we can immediately
 	 * return. That saves us doing a costly clock call to set the timeout. As a
 	 * side-effect, the timeout is actually applied without the time needed for
 	 * above reception. I think is is OK, even a bit logical ;)
@@ -483,7 +512,7 @@ relpSessWaitState(relpSess_t *pThis, relpSessState_t stateExpected, int timeout)
 	memcpy(&tTimeout, &tCurr, sizeof(struct timespec));
 	tTimeout.tv_sec += timeout;
 
-	while(1) {
+	while(!relpEngineShouldStop(pThis->pEngine)) {
 		sock = relpSessGetSock(pThis);
 		tvSelect.tv_sec = tTimeout.tv_sec - tCurr.tv_sec;
 		tvSelect.tv_usec = (tTimeout.tv_nsec - tCurr.tv_nsec) / 1000000;
@@ -497,13 +526,19 @@ relpSessWaitState(relpSess_t *pThis, relpSessState_t stateExpected, int timeout)
 
 		FD_ZERO(&readfds);
 		FD_SET(sock, &readfds);
-pThis->pEngine->dbgprint("relpSessWaitRsp waiting for data on fd %d, timeout %d.%d\n", sock, (int) tvSelect.tv_sec, (int) tvSelect.tv_usec);
+		pThis->pEngine->dbgprint("relpSessWaitRsp waiting for data on "
+			"fd %d, timeout %d.%d\n", sock, (int) tvSelect.tv_sec,
+			(int) tvSelect.tv_usec);
 		nfds = select(sock+1, (fd_set *) &readfds, NULL, NULL, &tvSelect);
-pThis->pEngine->dbgprint("relpSessWaitRsp select returns, nfds %d, errno %d\n", nfds, errno);
-		/* we don't check if we had a timeout - we give it one last chance */
+		pThis->pEngine->dbgprint("relpSessWaitRsp select returns, "
+			"nfds %d, errno %d\n", nfds, errno);
+		if(relpEngineShouldStop(pThis->pEngine))
+			break;
+		/* we don't check if we had a timeout-we give it one last chance*/
 		CHKRet(relpSessRcvData(pThis));
-pThis->pEngine->dbgprint("iRet after relpSessRcvData %d\n", iRet);
-		if(pThis->sessState == stateExpected || pThis->sessState == eRelpSessState_BROKEN) {
+		pThis->pEngine->dbgprint("iRet after relpSessRcvData %d\n", iRet);
+		if(   pThis->sessState == stateExpected
+		   || pThis->sessState == eRelpSessState_BROKEN) {
 			FINALIZE;
 		}
 
@@ -511,8 +546,8 @@ pThis->pEngine->dbgprint("iRet after relpSessRcvData %d\n", iRet);
 	}
 
 finalize_it:
-pThis->pEngine->dbgprint("relpSessWaitState returns %d\n", iRet);
-	if(iRet == RELP_RET_TIMED_OUT) {
+	pThis->pEngine->dbgprint("relpSessWaitState returns %d\n", iRet);
+	if(iRet == RELP_RET_TIMED_OUT || relpEngineShouldStop(pThis->pEngine)) {
 		/* the session is broken! */
 		pThis->sessState = eRelpSessState_BROKEN;
 	}
@@ -540,7 +575,7 @@ relpSessRawSendCommand(relpSess_t *pThis, unsigned char *pCmd, size_t lenCmd,
 	CHKRet(relpFrameBuildSendbuf(&pSendbuf, pThis->txnr, pCmd, lenCmd, pData, lenData, pThis, rspHdlr));
 	pThis->txnr = relpEngineNextTXNR(pThis->txnr);
 	/* now send it */
-pThis->pEngine->dbgprint("frame to send: '%s'\n", pSendbuf->pData + (9 - pSendbuf->lenTxnr));
+	pThis->pEngine->dbgprint("frame to send: '%s'\n", pSendbuf->pData + (9 - pSendbuf->lenTxnr));
 	iRet = relpSendbufSendAll(pSendbuf, pThis, 1);
 
 	if(iRet == RELP_RET_IO_ERR) {
@@ -568,22 +603,17 @@ relpSessSendCommand(relpSess_t *pThis, unsigned char *pCmd, size_t lenCmd,
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Sess);
 
-	/* this both reads server responses as well as makes sure we have space left
-	 * in our window. We provide a nearly eternal timeout (3 minutes). If we are not
-	 * ready to send in that period, something is awfully wrong. TODO: we may want
-	 * to make this timeout configurable, but I don't think it is a priority.
+	/* this both reads server responses as well as makes sure we have space
+	 * left in our window.
 	 */
-	//CHKRet(relpSessWaitState(pThis, eRelpSessState_READY_TO_SEND, 2));
-	CHKRet(relpSessWaitState(pThis, eRelpSessState_READY_TO_SEND, 180));
+	CHKRet(relpSessWaitState(pThis, eRelpSessState_READY_TO_SEND,
+		pThis->timeout));
 
 	/* re-try once if automatic retry mode is set */
-pThis->pEngine->dbgprint("send command relp sess state %d\n", pThis->sessState);
 	if(pThis->bAutoRetry && pThis->sessState == eRelpSessState_BROKEN) {
-pThis->pEngine->dbgprint("SendCommand does auto-retry\n");
 		CHKRet(relpSessTryReestablish(pThis));
 	}
 
-pThis->pEngine->dbgprint("sendcommand ready to send, relp sess state %d\n", pThis->sessState);
 	/* then send our data */
 	if(pThis->sessState == eRelpSessState_BROKEN)
 		ABORT_FINALIZE(RELP_RET_SESSION_BROKEN);
@@ -624,7 +654,8 @@ relpSessTryReestablish(relpSess_t *pThis)
 		pThis->pEngine->dbgprint("relp session %p reestablished, now resending %d unacked frames\n",
 					  pThis, pThis->lenUnackedLst);
 	while(pUnackedEtry != NULL) {
-pThis->pEngine->dbgprint("resending frame '%s'\n", pUnackedEtry->pSendbuf->pData + 9 - pUnackedEtry->pSendbuf->lenTxnr);
+		pThis->pEngine->dbgprint("resending frame '%s'\n", pUnackedEtry->pSendbuf->pData + 9
+								   - pUnackedEtry->pSendbuf->lenTxnr);
 		CHKRet(relpFrameRewriteTxnr(pUnackedEtry->pSendbuf, pThis->txnr));
 		pThis->txnr = relpEngineNextTXNR(pThis->txnr);
 		CHKRet(relpSendbufSendAll(pUnackedEtry->pSendbuf, pThis, 0));
@@ -632,7 +663,7 @@ pThis->pEngine->dbgprint("resending frame '%s'\n", pUnackedEtry->pSendbuf->pData
 	}
 
 finalize_it:
-pThis->pEngine->dbgprint("after TryReestablish, sess state %d\n", pThis->sessState);
+	pThis->pEngine->dbgprint("after TryReestablish, sess state %d\n", pThis->sessState);
 	LEAVE_RELPFUNC;
 }
 
@@ -765,8 +796,21 @@ relpSessConnect(relpSess_t *pThis, int protFamily, unsigned char *port, unsigned
 	pThis->txnr = 1;
 	pThis->sessType = eRelpSess_Client;	/* indicate we have a client session */
 
-	CHKRet(relpTcpConstruct(&pThis->pTcp, pThis->pEngine));
-	CHKRet(relpTcpConnect(pThis->pTcp, protFamily, port, host));
+	CHKRet(relpTcpConstruct(&pThis->pTcp, pThis->pEngine, RELP_CLT_CONN, pThis->pClt));
+	CHKRet(relpTcpSetUsrPtr(pThis->pTcp, pThis->pUsr));
+	if(pThis->bEnableTLS) {
+		CHKRet(relpTcpEnableTLS(pThis->pTcp));
+		if(pThis->bEnableTLSZip) {
+			CHKRet(relpTcpEnableTLSZip(pThis->pTcp));
+		}
+		CHKRet(relpTcpSetGnuTLSPriString(pThis->pTcp, pThis->pristring));
+		CHKRet(relpTcpSetCACert(pThis->pTcp, pThis->caCertFile));
+		CHKRet(relpTcpSetOwnCert(pThis->pTcp, pThis->ownCertFile));
+		CHKRet(relpTcpSetPrivKey(pThis->pTcp, pThis->privKeyFile));
+		CHKRet(relpTcpSetAuthMode(pThis->pTcp, pThis->authmode));
+		CHKRet(relpTcpSetPermittedPeers(pThis->pTcp, &pThis->permittedPeers));
+	}
+	CHKRet(relpTcpConnect(pThis->pTcp, protFamily, port, host, pThis->clientIP));
 	relpSessSetSessState(pThis, eRelpSessState_PRE_INIT);
 
 	/* create offers */
@@ -782,7 +826,6 @@ relpSessConnect(relpSess_t *pThis, int protFamily, unsigned char *port, unsigned
 	/* we now have received the server's response. Now is a good time to check if the offers
 	 * received back are compatible with what we need - and, if not, terminate the session...
 	 */
-pThis->pEngine->dbgprint("pre CltConnChkOffers %d\n", iRet);
 	CHKRet(relpSessCltConnChkOffers(pThis));
 	/* TODO: flag sesssion as broken if we did not succeed? */
 
@@ -844,6 +887,171 @@ finalize_it:
 }
 
 
+relpRetVal
+relpSessSetWindowSize(relpSess_t *pThis, int sizeWindow)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	if(sizeWindow > 1)
+		pThis->sizeWindow = sizeWindow;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetTimeout(relpSess_t *pThis, unsigned timeout)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	pThis->timeout = timeout;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetClientIP(relpSess_t *pThis, unsigned char *ip)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	free(pThis->clientIP);
+	if(ip == NULL)
+		pThis->clientIP = NULL;
+	else
+		pThis->clientIP = (unsigned char*) strdup((char*)  ip);
+	LEAVE_RELPFUNC;
+}
+
+/* this copies a *complete* permitted peers structure into the
+ * session object.
+ */
+relpRetVal
+relpSessSetPermittedPeers(relpSess_t *pThis, relpPermittedPeers_t *pPeers)
+{
+	ENTER_RELPFUNC;
+	int i;
+	RELPOBJ_assert(pThis, Sess);
+	
+	relpSessFreePermittedPeers(pThis);
+	if(pPeers->nmemb != 0) {
+		if((pThis->permittedPeers.name =
+			malloc(sizeof(char*) * pPeers->nmemb)) == NULL) {
+			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+		}
+		for(i = 0 ; i < pPeers->nmemb ; ++i) {
+			if((pThis->permittedPeers.name[i] = strdup(pPeers->name[i])) == NULL) {
+				ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+			}
+		}
+	}
+	pThis->permittedPeers.nmemb = pPeers->nmemb;
+finalize_it:
+	LEAVE_RELPFUNC;
+}
+
+/* Enable TLS mode. */
+relpRetVal
+relpSessEnableTLS(relpSess_t *pThis)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	pThis->bEnableTLS = 1;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetUsrPtr(relpSess_t *pThis, void *pUsr)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	pThis->pUsr = pUsr;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetAuthMode(relpSess_t *pThis, relpAuthMode_t authmode)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	pThis->authmode = authmode;
+	LEAVE_RELPFUNC;
+}
+
+/* Enable TLS Zip mode. */
+relpRetVal
+relpSessEnableTLSZip(relpSess_t *pThis)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Sess);
+	pThis->bEnableTLSZip = 1;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetGnuTLSPriString(relpSess_t *pThis, char *pristr)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Tcp);
+	
+	free(pThis->pristring);
+	if(pristr == NULL) {
+		pThis->pristring = NULL;
+	} else {
+		if((pThis->pristring = strdup(pristr)) == NULL)
+			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+	}
+finalize_it:
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetCACert(relpSess_t *pThis, char *cert)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Tcp);
+	
+	free(pThis->caCertFile);
+	if(cert == NULL) {
+		pThis->caCertFile = NULL;
+	} else {
+		if((pThis->caCertFile = strdup(cert)) == NULL)
+			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+	}
+finalize_it:
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetOwnCert(relpSess_t *pThis, char *cert)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Tcp);
+	
+	free(pThis->ownCertFile);
+	if(cert == NULL) {
+		pThis->ownCertFile = NULL;
+	} else {
+		if((pThis->ownCertFile = strdup(cert)) == NULL)
+			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+	}
+finalize_it:
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpSessSetPrivKey(relpSess_t *pThis, char *cert)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Tcp);
+	
+	free(pThis->privKeyFile);
+	if(cert == NULL) {
+		pThis->privKeyFile = NULL;
+	} else {
+		if((pThis->privKeyFile = strdup(cert)) == NULL)
+			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+	}
+finalize_it:
+	LEAVE_RELPFUNC;
+}
+
 /* set the protocol version to be used by this session
  * rgerhards, 2008-03-25
  */
@@ -902,7 +1110,6 @@ relpSessConstructOffers(relpSess_t *pThis, relpOffers_t **ppOffers)
 	/* now do the supported commands. Note that we must only send commands that
 	 * are explicitely enabled or desired.
 	 */
-pThis->pEngine->dbgprint("ConstructOffers syslog cmd state: %d\n", pThis->stateCmdSyslog);
 	CHKRet(relpOfferAdd(&pOffer, (unsigned char*) "commands", pOffers));
 	if(   pThis->stateCmdSyslog == eRelpCmdState_Enabled
 	   || pThis->stateCmdSyslog == eRelpCmdState_Desired

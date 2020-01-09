@@ -1,6 +1,6 @@
 /* The RELPSESS object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -70,30 +70,41 @@ struct relpSess_s {
 	BEGIN_RELP_OBJ;
 	relpEngine_t *pEngine;
 	relpSessType_t sessType;	/**< session type: 0 - server, 1 - client */
+	void *pUsr;		/**< user provided pointer (opaque data) */
 	relpTcp_t *pTcp;	/**< our sockt to the remote peer */
 	struct relpFrame_s *pCurrRcvFrame; /**< the current receive frame (a buffer) */
 	relpTxnr_t txnr;	/**< next txnr expected when receiving or to be used when sending */
 	size_t maxDataSize;  /**< maximum size of a DATA element (TODO: set after handshake on connect) */
 	pthread_mutex_t mutSend; /**< mutex for send operation (make sure txnr is correct) */
+	relpSrv_t *pSrv;	   /**< a pointer to our server object, if NULL, we belong to a client */
+	relpClt_t *pClt;	   /**< ptr to our client; only valid if pSrv == NULL */
 
 	/* connection parameters */
 	int protocolVersion; /* relp protocol version in use in this session */
 	/* Status of commands as supported in this session. */
 	relpCmdEnaState_t stateCmdSyslog;
+	int bEnableTLS;
+	int bEnableTLSZip;
+	char *pristring;
+	char *caCertFile;
+	char *ownCertFile;
+	char *privKeyFile;
+	relpAuthMode_t authmode;
+	relpPermittedPeers_t permittedPeers;
 
 	/* save the following for auto-reconnect case */
 	int protFamily;
 	unsigned char *srvPort;
 	unsigned char *srvAddr;
+	unsigned char *clientIP;	/* ar */
 
 	/* properties needed for server operation */
-	relpSrv_t *pSrv;	/**< the server we belong to */
 	struct relpSendq_s *pSendq; /**< our send queue */
 
 	/* properties needed for client operation */
 	int bAutoRetry;	/**< automatically try (once) to reestablish a broken session? */
 	int sizeWindow;	/**< size of our app-level communications window */
-	int timeout; /**< timeout after which session is to be considered broken */
+	unsigned timeout; /**< timeout after which session is to be considered broken */
 	relpSessState_t sessState; /**< state of our session */
 	/* linked list of frames with outstanding "rsp" */
 	relpSessUnacked_t *pUnackedLstRoot;
@@ -101,7 +112,7 @@ struct relpSess_s {
 	int lenUnackedLst;
 };
 
-/* macros for quick memeber access */
+/* macros for quick member access */
 #define relpSessGetSock(pThis)  (relpTcpGetSock((pThis)->pTcp))
 #define relpSessGetSessState(pThis) ((pThis)->sessState)
 #define relpSessSetSessState(pThis, state) ((pThis)->sessState = (state))
@@ -110,8 +121,15 @@ struct relpSess_s {
 #include "sendbuf.h"
 #include "sendq.h"
 
+/* inlines */
+static inline int
+relpSessTcpRequiresRtry(relpSess_t *pThis)
+{
+	return pThis->pTcp->rtryOp != relpTCP_RETRY_none;
+}
+
 /* prototypes */
-relpRetVal relpSessConstruct(relpSess_t **ppThis, relpEngine_t *pEngine, relpSrv_t *pSrv);
+relpRetVal relpSessConstruct(relpSess_t **ppThis, relpEngine_t *pEngine, int connType, void *pParent);
 relpRetVal relpSessDestruct(relpSess_t **ppThis);
 relpRetVal relpSessAcceptAndConstruct(relpSess_t **ppThis, relpSrv_t *pSrv, int sock);
 relpRetVal relpSessRcvData(relpSess_t *pThis);
@@ -125,7 +143,19 @@ relpRetVal relpSessAddUnacked(relpSess_t *pThis, relpSendbuf_t *pSendbuf);
 relpRetVal relpSessGetUnacked(relpSess_t *pThis, relpSendbuf_t **ppSendbuf, relpTxnr_t txnr);
 relpRetVal relpSessTryReestablish(relpSess_t *pThis);
 relpRetVal relpSessSetProtocolVersion(relpSess_t *pThis, int protocolVersion);
+relpRetVal relpSessSetTimeout(relpSess_t *pThis, unsigned timeout);
+relpRetVal relpSessSetWindowSize(relpSess_t *pThis, int sizeWindow);
+relpRetVal relpSessSetClientIP(relpSess_t *pThis, unsigned char *ip);
+relpRetVal relpSessEnableTLS(relpSess_t *pThis);
+relpRetVal relpSessEnableTLSZip(relpSess_t *pThis);
+relpRetVal relpSessSetAuthMode(relpSess_t *pThis, relpAuthMode_t authmode);
+relpRetVal relpSessSetGnuTLSPriString(relpSess_t *pThis, char *pristr);
+relpRetVal relpSessSetCACert(relpSess_t *pThis, char *cert);
+relpRetVal relpSessSetOwnCert(relpSess_t *pThis, char *cert);
+relpRetVal relpSessSetPrivKey(relpSess_t *pThis, char *cert);
 relpRetVal relpSessConstructOffers(relpSess_t *pThis, relpOffers_t **ppOffers);
+relpRetVal relpSessSetPermittedPeers(relpSess_t *pThis, relpPermittedPeers_t *pPeers);
+relpRetVal relpSessSetUsrPtr(relpSess_t *pThis, void *pUsr);
 relpRetVal relpSessSendSyslog(relpSess_t *pThis, unsigned char *pMsg, size_t lenMsg);
 relpRetVal relpSessSetEnableCmd(relpSess_t *pThis, unsigned char *pszCmd, relpCmdEnaState_t stateCmd);
 

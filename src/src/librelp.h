@@ -3,7 +3,7 @@
  * This file is meant to be included by applications using the relp library.
  * For relp library files themselves, include "relp.h".
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -36,7 +36,6 @@
 #ifndef LIBRELP_H_INCLUDED
 #define	LIBRELP_H_INCLUDED
 
-
 /* define some of our types that a caller must know about */
 typedef unsigned char relpOctet_t;
 typedef int relpTxnr_t;
@@ -51,7 +50,6 @@ typedef struct relpFrame_s relpFrame_t;
 typedef struct relpSendbuf_s relpSendbuf_t;
 typedef struct relpOffers_s relpOffers_t;
 typedef struct relpOffer_s relpOffer_t;
-typedef enum relpCmdEnaState_e relpCmdEnaState_t;
 
 /* IDs of librelp objects */
 typedef enum relpObjID_e {
@@ -70,6 +68,12 @@ typedef enum relpObjID_e {
 	eRelpObj_OfferValue = 12
 } relpObjID_t;
 
+/** authentication modes for TLS */
+typedef enum relpAuthMode_e {
+	eRelpAuthMode_None = 0,
+	eRelpAuthMode_Fingerprint = 1,
+	eRelpAuthMode_Name = 2
+} relpAuthMode_t;
 
 enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/request? */
 	eRelpCmdState_Unset = 0, /**< calloc default, not desired, not forbidden */
@@ -80,6 +84,7 @@ enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/
 	eRelpCmdState_Disabled = 5  /**< feature can NOT be used (set during open handshake) */
 };
 
+typedef enum relpCmdEnaState_e relpCmdEnaState_t;
 
 /* macro to assert we are dealing with the right relp object */
 #ifdef NDEBUG
@@ -133,6 +138,22 @@ enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/
 #define RELP_RET_INVALID_HNAME	RELPERR_BASE + 28	/**< remote peer's hostname invalid or unobtainable */
 #define RELP_RET_ADDR_UNKNOWN 	RELPERR_BASE + 29	/**< remote peer's IP address could not be obtained */
 #define RELP_RET_INVALID_PARAM 	RELPERR_BASE + 30	/**< librelp API called with wrong parameter */
+#define RELP_RET_ERR_TLS_SETUP 	RELPERR_BASE + 31	/**< problem during TLS setup */
+#define RELP_RET_INVLD_TLS_PRIO	RELPERR_BASE + 32	/**< TLS setup used invalid TLS priority string */
+#define RELP_RET_AUTH_ERR_FP	RELPERR_BASE + 33	/**< auth failed: non-permitted peer fingerprint */
+#define RELP_RET_AUTH_ERR_NAME	RELPERR_BASE + 34	/**< auth failed: no permitted peer name found */
+#define RELP_RET_AUTH_NO_CERT	RELPERR_BASE + 35	/**< auth failed: peer did not present a certificate */
+#define RELP_RET_AUTH_CERT_INVL RELPERR_BASE + 36	/**< auth failed: peer certificate invalid (did not pass validation) */
+#define RELP_RET_INVLD_AUTH_MD	RELPERR_BASE + 37	/**< lib user tried to set invalid auth mode */
+#define RELP_RET_INVLD_WILDCARD	RELPERR_BASE + 38	/**< invalid wildcard given in permitted peer name */
+#define RELP_RET_ERR_TLS_HANDS 	RELPERR_BASE + 39	/**< TLS handshake failed */
+#define RELP_RET_ERR_TLS	RELPERR_BASE + 40	/**< generic TLS error */
+#define RELP_RET_ERR_INVAL	RELPERR_BASE + 41	/**< some parameter is invalid (like EINVAL) */
+#define RELP_RET_ERR_EPOLL_CTL	RELPERR_BASE + 42	/**< epoll_ctl() failed */
+#define RELP_RET_ERR_INTERNAL	RELPERR_BASE + 43	/**< internal error in librelp (bug) */
+#define RELP_RET_WRN_NO_KEEPALIVE RELPERR_BASE + 44	/**< KEEPALIVE cannot be enabled */
+#define RELP_RET_ERR_NO_TLS	RELPERR_BASE + 45	/**< librelp compiled without TLS support */
+#define RELP_RET_ERR_NO_TLS_AUTH RELPERR_BASE + 46	/**< platform does not provide TLS auth support */
 
 /* some macros to work with librelp error codes */
 #define CHKRet(code) if((iRet = code) != RELP_RET_OK) goto finalize_it
@@ -141,22 +162,65 @@ enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/
 
 /* prototypes needed by library users */
 char *relpEngineGetVersion(void); /* use this entry point for configure check */
+void relpEngineSetShutdownImmdtPtr(relpEngine_t *pThis, int *ptr);
 relpRetVal relpEngineConstruct(relpEngine_t **ppThis);
 relpRetVal relpEngineDestruct(relpEngine_t **ppThis);
 relpRetVal relpEngineSetDbgprint(relpEngine_t *pThis, void (*dbgprint)(char *fmt, ...) __attribute__((format(printf, 1, 2))));
-relpRetVal relpEngineAddListner(relpEngine_t *pThis, unsigned char *pLstnPort);
+relpRetVal relpEngineAddListner(relpEngine_t *pThis, unsigned char *pLstnPort) __attribute__ ((deprecated));
+relpRetVal relpEngineAddListner2(relpEngine_t *pThis, unsigned char *pLstnPort, void*) __attribute__ ((deprecated));
+relpRetVal relpEngineListnerConstruct(relpEngine_t *pThis, relpSrv_t **ppSrv);
+relpRetVal relpEngineListnerConstructFinalize(relpEngine_t *pThis, relpSrv_t *pSrv);
+relpRetVal relpEngineSetStop(relpEngine_t *pThis);
+relpRetVal relpEngineSetFamily(relpEngine_t *pThis, int ai_family);
 relpRetVal relpEngineRun(relpEngine_t *pThis);
 relpRetVal relpEngineCltDestruct(relpEngine_t *pThis, relpClt_t **ppClt);
 relpRetVal relpEngineCltConstruct(relpEngine_t *pThis, relpClt_t **ppClt);
 relpRetVal relpEngineSetSyslogRcv(relpEngine_t *pThis,
 				  relpRetVal (*pCB)(unsigned char*, unsigned char*, unsigned char*, size_t));
+relpRetVal relpEngineSetSyslogRcv2(relpEngine_t *pThis,
+				  relpRetVal (*pCB)(void*, unsigned char*, unsigned char*, unsigned char*, size_t));
 relpRetVal relpEngineSetEnableCmd(relpEngine_t *pThis, unsigned char *pszCmd, relpCmdEnaState_t stateCmd);
 relpRetVal relpEngineSetDnsLookupMode(relpEngine_t *pThis, int iMode);
+relpRetVal relpEngineSetOnAuthErr(relpEngine_t *pThis,
+			          void (*pCB)(void*pUsr, char *authinfo, char*errmsg, relpRetVal errcode) );
+relpRetVal relpEngineSetOnErr(relpEngine_t *pThis,
+				void (*pCB)(void*pUsr, char *objinfo, char*errmsg, relpRetVal errcode) );
+relpRetVal relpEngineSetOnGenericErr(relpEngine_t *pThis,
+				void (*pCB)(char *objinfo, char*errmsg, relpRetVal errcode) );
+
+/* exposed server property set functions */
+relpRetVal relpSrvSetLstnPort(relpSrv_t *pThis, unsigned char *pLstnPort);
+relpRetVal relpSrvSetUsrPtr(relpSrv_t *pThis, void *pUsr);
+void relpSrvEnableTLS(relpSrv_t *pThis) __attribute__ ((deprecated));
+void relpSrvEnableTLSZip(relpSrv_t *pThis) __attribute__ ((deprecated));
+relpRetVal relpSrvEnableTLS2(relpSrv_t *pThis);
+relpRetVal relpSrvEnableTLSZip2(relpSrv_t *pThis);
+void relpSrvSetDHBits(relpSrv_t *pThis, int bits);
+void relpSrvSetKeepAlive(relpSrv_t *pThis, const int bEnabled, const int iKeepAliveIntvl, const int iKeepAliveProbes, const int iKeepAliveTime);
+relpRetVal relpSrvSetGnuTLSPriString(relpSrv_t *pThis, char *pristr);
+relpRetVal relpSrvSetCACert(relpSrv_t *pThis, char *cert);
+relpRetVal relpSrvSetOwnCert(relpSrv_t *pThis, char *cert);
+relpRetVal relpSrvSetPrivKey(relpSrv_t *pThis, char *cert);
+relpRetVal relpSrvSetAuthMode(relpSrv_t *pThis, char *mode);
+relpRetVal relpSrvAddPermittedPeer(relpSrv_t *pThis, char *peer);
 
 /* exposed relp client functions */
 relpRetVal relpCltConnect(relpClt_t *pThis, int protFamily, unsigned char *port, unsigned char *host);
 relpRetVal relpCltSendSyslog(relpClt_t *pThis, unsigned char *pMsg, size_t lenMsg);
+relpRetVal relpCltSetTimeout(relpClt_t *pThis, unsigned timeout);
+relpRetVal relpCltSetWindowSize(relpClt_t *pThis, int sizeWindow);
+relpRetVal relpCltSetClientIP(relpClt_t *pThis, unsigned char *ipAddr);
+relpRetVal relpCltEnableTLS(relpClt_t *pThis);
+relpRetVal relpCltEnableTLSZip(relpClt_t *pThis);
+relpRetVal relpCltSetGnuTLSPriString(relpClt_t *pThis, char *pristr);
+relpRetVal relpCltSetCACert(relpClt_t *pThis, char *file);
+relpRetVal relpCltSetOwnCert(relpClt_t *pThis, char *file);
+relpRetVal relpCltSetPrivKey(relpClt_t *pThis, char *file);
+relpRetVal relpCltSetAuthMode(relpClt_t *pThis, char *mode);
+relpRetVal relpCltAddPermittedPeer(relpClt_t *pThis, char *peer);
+relpRetVal relpCltSetUsrPtr(relpClt_t *pThis, void *pUsr);
 relpRetVal relpCltReconnect(relpClt_t *pThis);
-
+void relpCltHintBurstBegin(relpClt_t *pThis);
+void relpCltHintBurstEnd(relpClt_t *pThis);
 
 #endif /* #ifndef RELP_H_INCLUDED */

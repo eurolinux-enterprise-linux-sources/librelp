@@ -1,6 +1,6 @@
 /* The relp send buffer object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -33,6 +33,8 @@
 #include "config.h"
 #include <stdlib.h>
 #include <assert.h>
+#include <sys/types.h>
+#include <time.h>
 #include "relp.h"
 #include "sendbuf.h"
 
@@ -139,6 +141,19 @@ finalize_it:
 }
 
 
+/* a portable way to put the current thread asleep. Note that
+ * using the sleep() API family may result in the whole process
+ * to be put asleep on some platforms.
+ */
+static inline void
+doSleep(int iSeconds, int iuSeconds)
+{
+	struct timeval tvSelectTimeout;
+	tvSelectTimeout.tv_sec = iSeconds;
+	tvSelectTimeout.tv_usec = iuSeconds; /* micro seconds */
+	select(0, NULL, NULL, NULL, &tvSelectTimeout);
+}
+
 /* This functions sends a complete sendbuf (a blocking call). It
  * is intended for use by clients. Do NOT use it on servers as
  * that will block other activity. bAddToUnacked specifies if the
@@ -146,29 +161,50 @@ finalize_it:
  * this shall NOT happen. Mode 0 is used for session reestablishment,
  * when the unacked list needs to be retransmitted.
  * rgerhards, 2008-03-19
+ * The timeout handler may be one second off. This currently is good
+ * enough for our needs, but we may revisit this if we make larger
+ * changes to the lib. -- rgerhards, 2013-04-10
  */
 relpRetVal
 relpSendbufSendAll(relpSendbuf_t *pThis, relpSess_t *pSess, int bAddToUnacked)
 {
 	ssize_t lenToWrite;
 	ssize_t lenWritten;
+	struct timespec tCurr; /* absolute timeout value */
+	struct timespec tTimeout; /* absolute timeout value */
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Sendbuf);
 	RELPOBJ_assert(pSess,  Sess);
 
+	clock_gettime(CLOCK_REALTIME, &tTimeout);
+	tTimeout.tv_sec += pSess->timeout;
 	lenToWrite = pThis->lenData - pThis->bufPtr;
+	/* we compute the absolute timeout, as we may need to use it multiple
+	 * times in the loop below. Using the relative value would potentially
+	 * prolong it for quite some time!
+	 */
 	while(lenToWrite != 0) {
 		lenWritten = lenToWrite;
-//pSess->pEngine->dbgprint("sendbuf len %d, still to write %d\n", (int) pThis->lenData, (int) lenToWrite);
 		CHKRet(relpTcpSend(pSess->pTcp, pThis->pData + (9 - pThis->lenTxnr) + pThis->bufPtr, &lenWritten));
-
 		if(lenWritten == -1) {
 			ABORT_FINALIZE(RELP_RET_IO_ERR);
+		} else if(lenWritten == 0) {
+			pSess->pEngine->dbgprint("relpSendbufSendAll() wrote 0 octets, waiting...\n");
+			if(relpTcpWaitWriteable(pSess->pTcp, &tTimeout) == 0) {
+				ABORT_FINALIZE(RELP_RET_IO_ERR); /* timed out! */
+			}
 		} else if(lenWritten == lenToWrite) {
 			lenToWrite = 0;
 		} else {
 			pThis->bufPtr += lenWritten;
 			lenToWrite = pThis->lenData - pThis->bufPtr;
+		}
+		if(lenToWrite != 0) {
+			clock_gettime(CLOCK_REALTIME, &tCurr);
+			if(   (tCurr.tv_sec > tTimeout.tv_sec)
+			   || (tCurr.tv_sec == tTimeout.tv_sec && tCurr.tv_nsec >= tTimeout.tv_nsec)) {
+				ABORT_FINALIZE(RELP_RET_IO_ERR);
+			}
 		}
 	}
 

@@ -1,13 +1,21 @@
 Summary: The Reliable Event Logging Protocol library
 Name: librelp
-Version: 0.1.1
-Release: 4.1%{?dist}
+Version: 1.2.7
+Release: 3%{?dist}
 License: GPLv3+
 Group: System Environment/Libraries
 URL: http://www.rsyslog.com/
 Source0: http://download.rsyslog.com/librelp/%{name}-%{version}.tar.gz
+# patch sent upstream 2014-06-02
+Patch0: librelp-1.2.7-keepalive-segv.patch
+# patches 1..4 sent upstream 2014-06-03
+Patch1: librelp-1.2.7-alloc-size.patch
+Patch2: librelp-1.2.7-memleaks.patch
+Patch3: librelp-1.2.7-realloc.patch
+Patch4: librelp-1.2.7-misplaced-code.patch
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
+BuildRequires: gnutls-devel >= 1.4.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 %description
@@ -28,6 +36,11 @@ to develop applications using librelp.
 
 %prep
 %setup -q
+%patch0 -p1
+%patch1 -p1
+%patch2 -p1
+%patch3 -p1
+%patch4 -p1
 
 %build
 %configure --disable-static
@@ -61,6 +74,18 @@ fi
 %{_libdir}/pkgconfig/relp.pc
 
 %changelog
+* Mon Jun 02 2014 Tomas Heinrich <theinric@redhat.com> 1.2.7-3
+- add patches to resolve issues reported by Coverity
+  resolves: #966974
+
+* Mon Jun 02 2014 Tomas Heinrich <theinric@redhat.com> 1.2.7-2
+- add a patch to prevent a segfault when using TCP KEEPALIVE
+  resolves: #966974
+
+* Sun May 18 2014 Tomas Heinrich <theinric@redhat.com> 1.2.7-1
+- rebase to 1.2.7
+  resolves: #966974
+
 * Mon Nov 30 2009 Dennis Gregorovic <dgregor@redhat.com> - 0.1.1-4.1
 - Rebuilt for RHEL 6
 

@@ -1,6 +1,6 @@
 /* The RELP (reliable event logging protocol) core protocol library.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -34,9 +34,18 @@
 #define	RELP_H_INCLUDED
 
 #include <pthread.h>
+#if HAVE_SYS_EPOLL_H
+#	include <sys/epoll.h>
+#endif
 
 #include "librelp.h"
 
+/* "config params" - these can be overridden by defining the
+ * respective constants at compile time.
+ */
+#ifndef DEFAULT_DH_BITS /* security param: default Diffie-Hellman bits to use */
+#  define DEFAULT_DH_BITS 1024
+#endif
 
 /* the following macro MUST be specified as the first member of each
  * RELP object.
@@ -47,13 +56,42 @@
 #define RELP_CORE_CONSTRUCTOR(pObj, objType) \
 	(pObj)->objID = eRelpObj_##objType
 
+/* a structure to store permitted peer information (a type of ACL) */
+typedef struct relpPermittedPeers_s {
+	int nmemb;
+	char **name;
+} relpPermittedPeers_t;
 
+#if defined(HAVE_EPOLL_CREATE1) || defined(HAVE_EPOLL_CREATE)
+typedef struct epolld_s epolld_t;
+#endif
 /* a linked list entry for the list of relp servers (of this engine) */
 typedef struct relpEngSrvLst_s {
 	struct relpEngSrvLst_s *pPrev;
 	struct relpEngSrvLst_s *pNext;
+#	if defined(HAVE_EPOLL_CREATE1) || defined(HAVE_EPOLL_CREATE)
+	epolld_t **epevts;
+#	endif
 	struct relpSrv_s *pSrv;
 } relpEngSrvLst_t;
+
+#if defined(HAVE_EPOLL_CREATE1) || defined(HAVE_EPOLL_CREATE)
+/* type of object stored in epoll descriptor */
+typedef enum {
+	epolld_lstn,
+	epolld_sess
+} epolld_type_t;
+
+/* an epoll descriptor. contains all information necessary to process
+ * the result of epoll.
+ */
+struct epolld_s {
+	epolld_type_t typ;
+	void *ptr;
+	int sock;
+	struct epoll_event ev;
+};
+#endif
 
 
 /* a linked list entry for the list of relp sessions (of this engine) */
@@ -61,6 +99,10 @@ typedef struct relpEngSessLst_s {
 	struct relpEngSessLst_s *pPrev;
 	struct relpEngSessLst_s *pNext;
 	struct relpSess_s *pSess;
+#	if defined(HAVE_EPOLL_CREATE1) || defined(HAVE_EPOLL_CREATE)
+	enum { epoll_wronly, epoll_rdonly, epoll_rdwr } epollState;
+	epolld_t *epevt;
+#	endif
 } relpEngSessLst_t;
 
 
@@ -78,11 +120,17 @@ struct relpEngine_s {
 	void (*dbgprint)(char *fmt, ...) __attribute__((format(printf, 1, 2)));
 	relpRetVal (*onSyslogRcv)(unsigned char*pHostname, unsigned char *pIP,
 		                  unsigned char *pMsg, size_t lenMsg); /**< callback for "syslog" cmd */
+	relpRetVal (*onSyslogRcv2)(void*, unsigned char*pHostname, unsigned char *pIP,
+		                  unsigned char *pMsg, size_t lenMsg); /**< callback for "syslog" cmd */
+	void (*onAuthErr)(void*pUsr, char *authinfo, char*errmsg, relpRetVal errcode);
+	void (*onErr)(void*pUsr, char *objinfo, char*errmsg, relpRetVal errcode);
+	void (*onGenericErr)(char *objinfo, char*errmsg, relpRetVal errcode);
 	int protocolVersion; /**< version of the relp protocol supported by this engine */
 
 	/* Flags */
 	int bEnableDns; /**< enabled DNS lookups 0 - no, 1 - yes */
 	int bAcceptSessFromMalDnsHost; /**< accept session from host with malicious DNS? (0-no, 1-yes) */
+	int ai_family;	/**< to support IPv4/v6 modes */
 
 	/* default for enabled commands */
 	relpCmdEnaState_t stateCmdSyslog;
@@ -98,6 +146,16 @@ struct relpEngine_s {
 	relpEngSessLst_t *pSessLstLast;
 	int lenSessLst;
 	pthread_mutex_t mutSessLst;
+
+#	if defined(HAVE_EPOLL_CREATE1) || defined(HAVE_EPOLL_CREATE)
+	int efd;	/**< file descriptor for epoll */
+#	endif
+	int bStop;	/* set to 1 to stop server after next select */
+	int *bShutdownImmdt; /* if non-NULL provides a kind of "external" */
+		/* bStop functionality. This is in support for rsyslog,
+		 * whom's output interface is not capable of calling into
+		 * librelp at time of stop request.
+		 */
 };
 
 
@@ -123,7 +181,6 @@ struct relpEngine_s {
 #endif
 #ifndef RELP_DFLT_WINDOW_SIZE
 #	define RELP_DFLT_WINDOW_SIZE 128 /* 128 unacked frames should be fairly good in most cases */
-//#	define RELP_DFLT_WINDOW_SIZE 2 /* 16 unacked frames should be fairly good in most cases */
 #endif
 
 /* set the default receive buffer size if none is externally configured
@@ -137,6 +194,7 @@ struct relpEngine_s {
 
 /* some macros to work with librelp error codes */
 #define CHKRet(code) if((iRet = code) != RELP_RET_OK) goto finalize_it
+#define CHKmalloc(r) if((r) == NULL) { iRet = RELP_RET_OUT_OF_MEMORY; goto finalize_it; }
 /* macro below is to be used if we need our own handling, eg for cleanup */
 #define CHKRet_Hdlr(code) if((iRet = code) != RELP_RET_OK)
 /* macro below is used in conjunction with CHKiRet_Hdlr, else use ABORT_FINALIZE */
@@ -154,7 +212,14 @@ struct relpEngine_s {
 #define relpEngineNextTXNR(txnr) \
 	((txnr > 999999999) ? 1 : txnr + 1)
 
+static inline int relpEngineShouldStop(relpEngine_t *pThis) {
+//pThis->dbgprint("DDDD: librelp bStop %d, ShutdownImmdt %p, immdet result %d\n", pThis->bStop, pThis->bShutdownImmdt, (pThis->bShutdownImmdt == NULL) ? 0 : *pThis->bShutdownImmdt);
+	return     pThis->bStop
+	       || (pThis->bShutdownImmdt != NULL && *pThis->bShutdownImmdt);
+}
+
 /* prototypes needed by library itself (rest is in librelp.h) */
 relpRetVal relpEngineDispatchFrame(relpEngine_t *pThis, relpSess_t *pSess, relpFrame_t *pFrame);
+void __attribute__((format(printf, 4, 5))) relpEngineCallOnGenericErr(relpEngine_t *pThis, char *eobj, relpRetVal ecode, char *fmt, ...);
 
 #endif /* #ifndef RELP_H_INCLUDED */

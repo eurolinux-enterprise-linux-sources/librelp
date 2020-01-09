@@ -1,6 +1,6 @@
 /* The RELPCLT object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -40,9 +40,21 @@ struct relpClt_s {
 	BEGIN_RELP_OBJ;
 	relpEngine_t *pEngine;
 	relpSess_t *pSess;	/**< our session (the one and only!) */
+	void *pUsr;		/**< user pointer (opaque data) */
+	int bEnableTLS;		/**< is TLS to be used? */
+	int bEnableTLSZip;	/**< is compression to be used together with TLS? */
+	int sizeWindow;		/**< size of our app-level communications window */
+	char *pristring;	/**< priority string for GnuTLS */
+	relpAuthMode_t authmode;
+	char *caCertFile;
+	char *ownCertFile;
+	char *privKey;
+	relpPermittedPeers_t permittedPeers;
 	int protFamily;		/**< protocol family to connect over (IPv4, v6, ...) */
 	unsigned char *port;	/**< server port to connect to */
 	unsigned char *host;	/**< host(name) to connect to */
+	unsigned char *clientIP;/**< ip to bind to, or NULL if irrelevant */
+	unsigned timeout;	/**< session timeout */
 };
 
 

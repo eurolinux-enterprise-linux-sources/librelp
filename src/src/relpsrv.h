@@ -1,6 +1,6 @@
 /* The RELPSRV object.
  *
- * Copyright 2008 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -43,8 +43,23 @@ struct relpSrv_s {
 	BEGIN_RELP_OBJ;
 	relpEngine_t *pEngine;
 	unsigned char *pLstnPort;
+	int ai_family;
 	relpTcp_t *pTcp; /**< our tcp support object */
 	size_t maxDataSize;  /**< maximum size of a DATA element */
+	void *pUsr; /**< user pointer (passed back in to callback) */
+	int bKeepAlive;			/* support keep-alive packets */
+	int iKeepAliveIntvl;
+	int iKeepAliveProbes;
+	int iKeepAliveTime;
+	int bEnableTLS;			/* support for TLS */
+	int bEnableTLSZip;
+	int dhBits;	/**< number of bits for Diffie-Hellman key */
+	char *pristring; /**< priority string for GnuTLS */
+	char *caCertFile;
+	char *ownCertFile;
+	char *privKey;
+	relpAuthMode_t authmode;
+	relpPermittedPeers_t permittedPeers;
 
 	/* Status of commands as supported in this session. */
 	relpCmdEnaState_t stateCmdSyslog;
@@ -58,7 +73,7 @@ struct relpSrv_s {
 /* prototypes */
 relpRetVal relpSrvConstruct(relpSrv_t **ppThis, relpEngine_t *pEngine);
 relpRetVal relpSrvDestruct(relpSrv_t **ppThis);
-relpRetVal relpSrvSetLstnPort(relpSrv_t *pThis, unsigned char *pLstnPort);
+relpRetVal relpSrvSetFamily(relpSrv_t *pThis, int ai_family);
 relpRetVal relpSrvRun(relpSrv_t *pThis);
 
 #endif /* #ifndef RELPSRV_H_INCLUDED */
