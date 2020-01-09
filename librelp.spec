@@ -1,7 +1,7 @@
 Summary: The Reliable Event Logging Protocol library
 Name: librelp
 Version: 1.2.7
-Release: 3%{?dist}
+Release: 3%{?dist}.1
 License: GPLv3+
 Group: System Environment/Libraries
 URL: http://www.rsyslog.com/
@@ -13,6 +13,7 @@ Patch1: librelp-1.2.7-alloc-size.patch
 Patch2: librelp-1.2.7-memleaks.patch
 Patch3: librelp-1.2.7-realloc.patch
 Patch4: librelp-1.2.7-misplaced-code.patch
+Patch5: librelp-1.2.7-rhbz1561230-snprintf.patch
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 BuildRequires: gnutls-devel >= 1.4.0
@@ -41,6 +42,7 @@ to develop applications using librelp.
 %patch2 -p1
 %patch3 -p1
 %patch4 -p1
+%patch5 -p1 -b .snprintf
 
 %build
 %configure --disable-static
@@ -74,6 +76,10 @@ fi
 %{_libdir}/pkgconfig/relp.pc
 
 %changelog
+* Wed Mar 28 2018 Radovan Sroka <rsroka@redhat.com> 1.2.7-3.1
+- fixed CVE-2018-1000140
+- resolved: rhbz#1561230
+
 * Mon Jun 02 2014 Tomas Heinrich <theinric@redhat.com> 1.2.7-3
 - add patches to resolve issues reported by Coverity
   resolves: #966974
