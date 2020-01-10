@@ -1,7 +1,7 @@
 Summary: The Reliable Event Logging Protocol library
 Name: librelp
 Version: 1.2.12
-Release: 1%{?dist}
+Release: 1%{?dist}.1
 License: GPLv3+
 Group: System Environment/Libraries
 URL: http://www.rsyslog.com/
@@ -10,6 +10,8 @@ Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 BuildRequires: gnutls-devel >= 1.4.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+
+Patch1: librelp-1.2.12-rhbz1561232-snprintf.patch
 
 %description
 Librelp is an easy to use library for the RELP protocol. RELP (stands
@@ -29,6 +31,8 @@ to develop applications using librelp.
 
 %prep
 %setup -q
+
+%patch1 -p1 -b .snprintf
 
 %build
 %configure --disable-static
@@ -62,6 +66,14 @@ fi
 %{_libdir}/pkgconfig/relp.pc
 
 %changelog
+* Wed Mar 28 2018 Radovan Sroka <rsroka@redhat.com> 1.2.12-1.1
+- fixed bad NVR
+- resolves rhbz#1561232
+
+* Wed Mar 28 2018 Radovan Sroka <rsroka@redhat.com> 1.2.12-2
+- fixed CVE-2018-1000140
+- resolves rhbz#1561232
+
 * Mon Feb 13 2017 Radovan Sroka <rsroka@redhat.com> 1.2.12-1
 - rebase to 1.2.12
 - inevitable update due to rsyslog rebase 
