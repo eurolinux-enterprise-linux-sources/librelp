@@ -1,6 +1,6 @@
 /* The relp server.
  *
- * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2014 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -284,17 +284,51 @@ relpSrvSetDHBits(relpSrv_t *pThis, int bits)
 {
 	pThis->dhBits = bits;
 }
+relpRetVal
+relpSrvEnableTLS2(relpSrv_t __attribute__((unused)) *pThis)
+{
+	ENTER_RELPFUNC;
+#ifdef ENABLE_TLS
+	pThis->bEnableTLS = 1;
+#else
+	iRet = RELP_RET_ERR_NO_TLS;
+#endif /* #ifdef ENABLE_TLS */
+	LEAVE_RELPFUNC;
+}
+relpRetVal
+relpSrvEnableTLSZip2(relpSrv_t __attribute__((unused)) *pThis)
+{
+	ENTER_RELPFUNC;
+#ifdef ENABLE_TLS
+	pThis->bEnableTLSZip = 1;
+#else
+	iRet = RELP_RET_ERR_NO_TLS;
+#endif /* #ifdef ENABLE_TLS */
+	LEAVE_RELPFUNC;
+}
 void
 relpSrvEnableTLS(relpSrv_t *pThis)
 {
-	pThis->bEnableTLS = 1;
+	relpSrvEnableTLS2(pThis);
 }
 void
 relpSrvEnableTLSZip(relpSrv_t *pThis)
 {
-	pThis->bEnableTLSZip = 1;
+	relpSrvEnableTLSZip2(pThis);
 }
 
+void
+relpSrvSetKeepAlive(relpSrv_t *pThis,
+	const int bEnabled,
+	const int iKeepAliveIntvl,
+	const int iKeepAliveProbes,
+	const int iKeepAliveTime)
+{
+	pThis->bKeepAlive = bEnabled;
+	pThis->iKeepAliveIntvl = iKeepAliveIntvl;
+	pThis->iKeepAliveProbes = iKeepAliveProbes;
+	pThis->iKeepAliveTime = iKeepAliveTime;
+}
 
 /* start a relp server - the server object must have all properties set
  * rgerhards, 2008-03-17
@@ -310,16 +344,16 @@ relpSrvRun(relpSrv_t *pThis)
 	CHKRet(relpTcpConstruct(&pTcp, pThis->pEngine, RELP_SRV_CONN, pThis));
 	relpTcpSetUsrPtr(pTcp, pThis->pUsr);
 	if(pThis->bEnableTLS) {
-		relpTcpEnableTLS(pTcp);
+		CHKRet(relpTcpEnableTLS(pTcp));
 		if(pThis->bEnableTLSZip) {
-			relpTcpEnableTLSZip(pTcp);
+			CHKRet(relpTcpEnableTLSZip(pTcp));
 		}
 		relpTcpSetDHBits(pTcp, pThis->dhBits);
-		relpTcpSetGnuTLSPriString(pTcp, pThis->pristring);
-		relpTcpSetAuthMode(pTcp, pThis->authmode);
-		relpTcpSetCACert(pTcp, pThis->caCertFile);
-		relpTcpSetOwnCert(pTcp, pThis->ownCertFile);
-		relpTcpSetPrivKey(pTcp, pThis->privKey);
+		CHKRet(relpTcpSetGnuTLSPriString(pTcp, pThis->pristring));
+		CHKRet(relpTcpSetAuthMode(pTcp, pThis->authmode));
+		CHKRet(relpTcpSetCACert(pTcp, pThis->caCertFile));
+		CHKRet(relpTcpSetOwnCert(pTcp, pThis->ownCertFile));
+		CHKRet(relpTcpSetPrivKey(pTcp, pThis->privKey));
 		CHKRet(relpTcpSetPermittedPeers(pTcp, &(pThis->permittedPeers)));
 	}
 	CHKRet(relpTcpLstnInit(pTcp, (pThis->pLstnPort == NULL) ? (unsigned char*) RELP_DFLT_PORT : pThis->pLstnPort, pThis->ai_family));

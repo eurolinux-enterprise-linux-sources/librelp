@@ -1,7 +1,7 @@
 Summary: The Reliable Event Logging Protocol library
 Name: librelp
-Version: 1.2.0
-Release: 3%{?dist}
+Version: 1.2.12
+Release: 1%{?dist}
 License: GPLv3+
 Group: System Environment/Libraries
 URL: http://www.rsyslog.com/
@@ -62,6 +62,11 @@ fi
 %{_libdir}/pkgconfig/relp.pc
 
 %changelog
+* Mon Feb 13 2017 Radovan Sroka <rsroka@redhat.com> 1.2.12-1
+- rebase to 1.2.12
+- inevitable update due to rsyslog rebase 
+- resolves rhbz#1420716
+
 * Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 1.2.0-3
 - Mass rebuild 2014-01-24
 

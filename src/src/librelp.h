@@ -50,7 +50,6 @@ typedef struct relpFrame_s relpFrame_t;
 typedef struct relpSendbuf_s relpSendbuf_t;
 typedef struct relpOffers_s relpOffers_t;
 typedef struct relpOffer_s relpOffer_t;
-typedef enum relpCmdEnaState_e relpCmdEnaState_t;
 
 /* IDs of librelp objects */
 typedef enum relpObjID_e {
@@ -85,6 +84,7 @@ enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/
 	eRelpCmdState_Disabled = 5  /**< feature can NOT be used (set during open handshake) */
 };
 
+typedef enum relpCmdEnaState_e relpCmdEnaState_t;
 
 /* macro to assert we are dealing with the right relp object */
 #ifdef NDEBUG
@@ -151,6 +151,10 @@ enum relpCmdEnaState_e { /* command enabled state - what are we permitted to do/
 #define RELP_RET_ERR_INVAL	RELPERR_BASE + 41	/**< some parameter is invalid (like EINVAL) */
 #define RELP_RET_ERR_EPOLL_CTL	RELPERR_BASE + 42	/**< epoll_ctl() failed */
 #define RELP_RET_ERR_INTERNAL	RELPERR_BASE + 43	/**< internal error in librelp (bug) */
+#define RELP_RET_WRN_NO_KEEPALIVE RELPERR_BASE + 44	/**< KEEPALIVE cannot be enabled */
+#define RELP_RET_ERR_NO_TLS	RELPERR_BASE + 45	/**< librelp compiled without TLS support */
+#define RELP_RET_ERR_NO_TLS_AUTH RELPERR_BASE + 46	/**< platform does not provide TLS auth support */
+#define RELP_RET_SESSION_OPEN	RELPERR_BASE + 47	/**< RELP session is (already) open */
 
 /* some macros to work with librelp error codes */
 #define CHKRet(code) if((iRet = code) != RELP_RET_OK) goto finalize_it
@@ -188,9 +192,12 @@ relpRetVal relpEngineSetOnGenericErr(relpEngine_t *pThis,
 /* exposed server property set functions */
 relpRetVal relpSrvSetLstnPort(relpSrv_t *pThis, unsigned char *pLstnPort);
 relpRetVal relpSrvSetUsrPtr(relpSrv_t *pThis, void *pUsr);
-void relpSrvEnableTLS(relpSrv_t *pThis);
-void relpSrvEnableTLSZip(relpSrv_t *pThis);
+void relpSrvEnableTLS(relpSrv_t *pThis) __attribute__ ((deprecated));
+void relpSrvEnableTLSZip(relpSrv_t *pThis) __attribute__ ((deprecated));
+relpRetVal relpSrvEnableTLS2(relpSrv_t *pThis);
+relpRetVal relpSrvEnableTLSZip2(relpSrv_t *pThis);
 void relpSrvSetDHBits(relpSrv_t *pThis, int bits);
+void relpSrvSetKeepAlive(relpSrv_t *pThis, const int bEnabled, const int iKeepAliveIntvl, const int iKeepAliveProbes, const int iKeepAliveTime);
 relpRetVal relpSrvSetGnuTLSPriString(relpSrv_t *pThis, char *pristr);
 relpRetVal relpSrvSetCACert(relpSrv_t *pThis, char *cert);
 relpRetVal relpSrvSetOwnCert(relpSrv_t *pThis, char *cert);
@@ -202,6 +209,7 @@ relpRetVal relpSrvAddPermittedPeer(relpSrv_t *pThis, char *peer);
 relpRetVal relpCltConnect(relpClt_t *pThis, int protFamily, unsigned char *port, unsigned char *host);
 relpRetVal relpCltSendSyslog(relpClt_t *pThis, unsigned char *pMsg, size_t lenMsg);
 relpRetVal relpCltSetTimeout(relpClt_t *pThis, unsigned timeout);
+relpRetVal relpCltSetConnTimeout(relpClt_t *pThis, int connTimeout);
 relpRetVal relpCltSetWindowSize(relpClt_t *pThis, int sizeWindow);
 relpRetVal relpCltSetClientIP(relpClt_t *pThis, unsigned char *ipAddr);
 relpRetVal relpCltEnableTLS(relpClt_t *pThis);

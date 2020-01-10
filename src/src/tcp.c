@@ -1,8 +1,12 @@
 /* This implements the relp mapping onto TCP.
  *
- * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2016 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
+ *
+ * Note: gnutls_certificate_set_verify_function is problematic, as it
+ *       is not available in old GnuTLS versions, but rather important
+ *       for verifying certificates correctly.
  *
  * Librelp is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,27 +46,30 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
 #include <assert.h>
 #include "relp.h"
 #include "relpsrv.h"
 #include "relpclt.h"
 #include "relpsess.h"
 #include "tcp.h"
-#include <gnutls/gnutls.h>
-#include <gnutls/x509.h>
-#if GNUTLS_VERSION_NUMBER <= 0x020b00
-#	include <gcrypt.h>
+#ifdef ENABLE_TLS
+#	include <gnutls/gnutls.h>
+#	include <gnutls/x509.h>
+#	if GNUTLS_VERSION_NUMBER <= 0x020b00
+#		include <gcrypt.h>
+		GCRY_THREAD_OPTION_PTHREAD_IMPL;
+#	endif
+	static int called_gnutls_global_init = 0;
 #endif
 
-#if GNUTLS_VERSION_NUMBER <= 0x020b00
-GCRY_THREAD_OPTION_PTHREAD_IMPL;
-#endif
-
-static int called_gnutls_global_init = 0;
 
 
+#ifdef ENABLE_TLS
 /* forward definitions */
+#ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION
 static int relpTcpVerifyCertificateCallback(gnutls_session_t session);
+#endif /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION */
 static relpRetVal relpTcpPermittedPeerWildcardCompile(tcpPermittedPeerEntry_t *pEtry);
 
 /* helper to free permittedPeer structure */
@@ -74,6 +81,7 @@ relpTcpFreePermittedPeers(relpTcp_t *pThis)
 		free(pThis->permittedPeers.peer[i].name);
 	pThis->permittedPeers.nmemb = 0;
 }
+#endif /* #ifdef ENABLE_TLS */
 
 /** Construct a RELP tcp instance
  * This is the first thing that a caller must do before calling any
@@ -125,7 +133,9 @@ relpTcpDestruct(relpTcp_t **ppThis)
 {
 	relpTcp_t *pThis;
 	int i;
+#ifdef ENABLE_TLS
 	int gnuRet;
+#endif /* #ifdef ENABLE_TLS */
 
 	ENTER_RELPFUNC;
 	assert(ppThis != NULL);
@@ -144,6 +154,7 @@ relpTcpDestruct(relpTcp_t **ppThis)
 		free(pThis->socks);
 	}
 
+#ifdef ENABLE_TLS
 	if(pThis->bTLSActive) {
 		gnuRet = gnutls_bye(pThis->session, GNUTLS_SHUT_RDWR);
 		while(gnuRet == GNUTLS_E_INTERRUPTED || gnuRet == GNUTLS_E_AGAIN) {
@@ -151,8 +162,9 @@ relpTcpDestruct(relpTcp_t **ppThis)
 		}
 		gnutls_deinit(pThis->session);
 	}
-
 	relpTcpFreePermittedPeers(pThis);
+#endif /* #ifdef ENABLE_TLS */
+
 	free(pThis->pRemHostIP);
 	free(pThis->pRemHostName);
 	free(pThis->pristring);
@@ -170,7 +182,9 @@ relpTcpDestruct(relpTcp_t **ppThis)
 
 /* helper to call onErr if set */
 static void
-callOnErr(relpTcp_t *pThis, char *emsg, relpRetVal ecode)
+callOnErr(const relpTcp_t *__restrict__ const pThis,
+	char *__restrict__ const emsg,
+	const relpRetVal ecode)
 {
 	char objinfo[1024];
 	pThis->pEngine->dbgprint("librelp: generic error: ecode %d, "
@@ -194,6 +208,7 @@ callOnErr(relpTcp_t *pThis, char *emsg, relpRetVal ecode)
 }
 
 
+#ifdef ENABLE_TLS
 /* helper to call an error code handler if gnutls failed. If there is a failure, 
  * an error message is pulled form gnutls and the error message properly 
  * populated.
@@ -228,6 +243,7 @@ callOnAuthErr(relpTcp_t *pThis, char *authdata, char *emsg, relpRetVal ecode)
 		pThis->pEngine->onAuthErr(pThis->pUsr, authdata, emsg, ecode);
 	}
 }
+#endif /* #ifdef ENABLE_TLS */
 
 /* abort a tcp connection. This is much like relpTcpDestruct(), but tries
  * to discard any unsent data. -- rgerhards, 2008-03-24
@@ -301,17 +317,16 @@ relpTcpSetRemHost(relpTcp_t *pThis, struct sockaddr *pAddr)
 	pEngine = pThis->pEngine;
 	assert(pAddr != NULL);
 
-        error = getnameinfo(pAddr, SALEN(pAddr), (char*)szIP, sizeof(szIP), NULL, 0, NI_NUMERICHOST);
-
-        if(error) {
-                pThis->pEngine->dbgprint("Malformed from address %s\n", gai_strerror(error));
+	error = getnameinfo(pAddr, SALEN(pAddr), (char*)szIP, sizeof(szIP), NULL, 0, NI_NUMERICHOST);
+	if(error) {
+		pThis->pEngine->dbgprint("Malformed from address %s\n", gai_strerror(error));
 		strcpy((char*)szHname, "???");
 		strcpy((char*)szIP, "???");
 		ABORT_FINALIZE(RELP_RET_INVALID_HNAME);
 	}
 
 	if(pEngine->bEnableDns) {
-		error = getnameinfo(pAddr, SALEN(pAddr), (char*)szHname, NI_MAXHOST, NULL, 0, NI_NAMEREQD);
+		error = getnameinfo(pAddr, SALEN(pAddr), (char*)szHname, sizeof(szHname), NULL, 0, NI_NAMEREQD);
 		if(error == 0) {
 			memset (&hints, 0, sizeof (struct addrinfo));
 			hints.ai_flags = AI_NUMERICHOST;
@@ -359,12 +374,12 @@ finalize_it:
  * tcp object.
  */
 relpRetVal
-relpTcpSetPermittedPeers(relpTcp_t *pThis, relpPermittedPeers_t *pPeers)
+relpTcpSetPermittedPeers(relpTcp_t __attribute__((unused)) *pThis,
+	relpPermittedPeers_t __attribute__((unused)) *pPeers)
 {
 	ENTER_RELPFUNC;
+#ifdef ENABLE_TLS
 	int i;
-	RELPOBJ_assert(pThis, Tcp);
-	
 	relpTcpFreePermittedPeers(pThis);
 	if(pPeers->nmemb != 0) {
 		if((pThis->permittedPeers.peer =
@@ -381,6 +396,9 @@ relpTcpSetPermittedPeers(relpTcp_t *pThis, relpPermittedPeers_t *pPeers)
 		}
 	}
 	pThis->permittedPeers.nmemb = pPeers->nmemb;
+#else
+	ABORT_FINALIZE(RELP_RET_ERR_NO_TLS);
+#endif /* #ifdef ENABLE_TLS */
 finalize_it:
 	LEAVE_RELPFUNC;
 }
@@ -400,6 +418,15 @@ relpTcpSetAuthMode(relpTcp_t *pThis, relpAuthMode_t authmode)
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
 	pThis->authmode = authmode;
+	LEAVE_RELPFUNC;
+}
+
+relpRetVal
+relpTcpSetConnTimeout(relpTcp_t *pThis, int connTimeout)
+{
+	ENTER_RELPFUNC;
+	RELPOBJ_assert(pThis, Tcp);
+	pThis->connTimeout = connTimeout;
 	LEAVE_RELPFUNC;
 }
 
@@ -464,8 +491,12 @@ relpTcpSetPrivKey(relpTcp_t *pThis, char *cert)
 	if(cert == NULL) {
 		pThis->privKeyFile = NULL;
 	} else {
-		if((pThis->privKeyFile = strdup(cert)) == NULL)
-			ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+#		ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION  
+			if((pThis->privKeyFile = strdup(cert)) == NULL)
+				ABORT_FINALIZE(RELP_RET_OUT_OF_MEMORY);
+#		else
+			ABORT_FINALIZE(RELP_RET_ERR_NO_TLS_AUTH);
+#		endif
 	}
 finalize_it:
 	LEAVE_RELPFUNC;
@@ -474,20 +505,28 @@ finalize_it:
 
 /* Enable TLS mode. */
 relpRetVal
-relpTcpEnableTLS(relpTcp_t *pThis)
+relpTcpEnableTLS(relpTcp_t __attribute__((unused)) *pThis)
 {
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
+#ifdef ENABLE_TLS
 	pThis->bEnableTLS = 1;
+#else
+	iRet = RELP_RET_ERR_NO_TLS;
+#endif /* #ifdef ENABLE_TLS */
 	LEAVE_RELPFUNC;
 }
 
 relpRetVal
-relpTcpEnableTLSZip(relpTcp_t *pThis)
+relpTcpEnableTLSZip(relpTcp_t __attribute__((unused)) *pThis)
 {
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
+#ifdef ENABLE_TLS
 	pThis->bEnableTLSZip = 1;
+#else
+	iRet = RELP_RET_ERR_NO_TLS;
+#endif /* #ifdef ENABLE_TLS */
 	LEAVE_RELPFUNC;
 }
 
@@ -500,6 +539,7 @@ relpTcpSetDHBits(relpTcp_t *pThis, int bits)
 	LEAVE_RELPFUNC;
 }
 
+#ifdef ENABLE_TLS
 /* set TLS priority string, common code both for client and server */
 static relpRetVal
 relpTcpTLSSetPrio(relpTcp_t *pThis)
@@ -533,7 +573,9 @@ finalize_it:
 	LEAVE_RELPFUNC;
 }
 
-
+#pragma GCC diagnostic push
+/* per https://lists.gnupg.org/pipermail/gnutls-help/2004-August/000154.html This is expected */
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
 static relpRetVal
 relpTcpAcceptConnReqInitTLS(relpTcp_t *pThis, relpSrv_t *pSrv)
 {
@@ -585,6 +627,94 @@ relpTcpAcceptConnReqInitTLS(relpTcp_t *pThis, relpSrv_t *pSrv)
 finalize_it:
   	LEAVE_RELPFUNC;
 }
+#pragma GCC diagnostic pop
+#endif /* #ifdef ENABLE_TLS */
+
+/* Enable KEEPALIVE handling on the socket.  */
+static void
+EnableKeepAlive(const relpTcp_t *__restrict__ const pThis,
+	const relpSrv_t *__restrict__ const pSrv,
+	const int sock)
+{
+	int ret;
+	int optval;
+	socklen_t optlen;
+
+	optval = 1;
+	optlen = sizeof(optval);
+	ret = setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &optval, optlen);
+	if(ret < 0) {
+		pThis->pEngine->dbgprint("librelp: EnableKeepAlive socket call "
+					"returns error %d\n", ret);
+		goto done;
+	}
+
+#	if defined(TCP_KEEPCNT)
+	if(pSrv->iKeepAliveProbes > 0) {
+		optval = pSrv->iKeepAliveProbes;
+		optlen = sizeof(optval);
+		ret = setsockopt(sock, SOL_TCP, TCP_KEEPCNT, &optval, optlen);
+	} else {
+		ret = 0;
+	}
+#	else
+	ret = -1;
+#	endif
+	if(ret < 0) {
+		callOnErr(pThis, "librelp cannot set keepalive probes - ignored",
+			  RELP_RET_WRN_NO_KEEPALIVE);
+	}
+
+#	if defined(TCP_KEEPCNT)
+	if(pSrv->iKeepAliveTime > 0) {
+		optval = pSrv->iKeepAliveTime;
+		optlen = sizeof(optval);
+		ret = setsockopt(sock, SOL_TCP, TCP_KEEPIDLE, &optval, optlen);
+	} else {
+		ret = 0;
+	}
+#	else
+	ret = -1;
+#	endif
+	if(ret < 0) {
+		callOnErr(pThis, "librelp cannot set keepalive time - ignored",
+			  RELP_RET_WRN_NO_KEEPALIVE);
+	}
+
+#	if defined(TCP_KEEPCNT)
+	if(pSrv->iKeepAliveIntvl > 0) {
+		optval = pSrv->iKeepAliveIntvl;
+		optlen = sizeof(optval);
+		ret = setsockopt(sock, SOL_TCP, TCP_KEEPINTVL, &optval, optlen);
+	} else {
+		ret = 0;
+	}
+#	else
+	ret = -1;
+#	endif
+	if(ret < 0) {
+		callOnErr(pThis, "librelp cannot set keepalive intvl - ignored",
+			  RELP_RET_WRN_NO_KEEPALIVE);
+	}
+
+	// pThis->pEngine->dbgprint("KEEPALIVE enabled for socket %d\n", sock);
+
+done:
+  	return;
+}
+
+/* a portable way to put the current thread asleep. Note that
+ * using the sleep() API family may result in the whole process
+ * to be put asleep on some platforms.
+ */
+static void
+doSleep(int iSeconds, int iuSeconds)
+{
+	struct timeval tvSelectTimeout;
+	tvSelectTimeout.tv_sec = iSeconds;
+	tvSelectTimeout.tv_usec = iuSeconds; /* micro seconds */
+	select(0, NULL, NULL, NULL, &tvSelectTimeout);
+}
 
 /* accept an incoming connection request, sock provides the socket on which we can
  * accept the new session.
@@ -604,12 +734,20 @@ relpTcpAcceptConnReq(relpTcp_t **ppThis, int sock, relpSrv_t *pSrv)
 	assert(ppThis != NULL);
 
 	iNewSock = accept(sock, (struct sockaddr*) &addr, &addrlen);
+	int errnosave = errno;
 	if(iNewSock < 0) {
+		pSrv->pEngine->dbgprint("error during accept, sleeping 20ms: %s\n",
+			strerror(errnosave));
+		doSleep(0, 20000);
+		pSrv->pEngine->dbgprint("END SLEEP\n");
 		ABORT_FINALIZE(RELP_RET_ACCEPT_ERR);
 	}
 
 	/* construct our object so that we can use it... */
 	CHKRet(relpTcpConstruct(&pThis, pEngine, RELP_SRV_CONN, pSrv));
+
+	if(pSrv->bKeepAlive)
+		EnableKeepAlive(pThis, pSrv, iNewSock);
 
 	/* TODO: obtain hostname, normalize (callback?), save it */
 	CHKRet(relpTcpSetRemHost(pThis, (struct sockaddr*) &addr));
@@ -629,12 +767,14 @@ relpTcpAcceptConnReq(relpTcp_t **ppThis, int sock, relpSrv_t *pSrv)
 	}
 
 	pThis->sock = iNewSock;
+#ifdef ENABLE_TLS
 	if(pSrv->pTcp->bEnableTLS) {
 		pThis->bEnableTLS = 1;
 		pThis->pSrv = pSrv;
 		CHKRet(relpTcpSetPermittedPeers(pThis, &(pSrv->permittedPeers)));
 		CHKRet(relpTcpAcceptConnReqInitTLS(pThis, pSrv));
 	}
+#endif /* #ifdef ENABLE_TLS */
 
 	*ppThis = pThis;
 
@@ -650,6 +790,8 @@ finalize_it:
 	LEAVE_RELPFUNC;
 }
 
+#ifdef ENABLE_TLS
+#ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION  
 /* Convert a fingerprint to printable data. The function must be provided a
  * sufficiently large buffer. 512 bytes shall always do.
  */
@@ -667,7 +809,7 @@ GenFingerprintStr(char *pFingerprint, int sizeFingerprint, char *fpBuf)
 
 /* Check the peer's ID in fingerprint auth mode. */
 static int
-relpTcpChkPeerFingerprint(relpTcp_t *pThis, gnutls_x509_crt cert)
+relpTcpChkPeerFingerprint(relpTcp_t *pThis, gnutls_x509_crt_t cert)
 {
 	int r = 0;
 	int i;
@@ -704,6 +846,7 @@ done:
 	}
 	return r;
 }
+#endif /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION */
 
 /* add a wildcard entry to this permitted peer. Entries are always
  * added at the tail of the list. pszStr and lenStr identify the wildcard
@@ -789,7 +932,7 @@ finalize_it:
 	LEAVE_RELPFUNC;
 }
 
-/* Compile a wildcard - must not yet be comipled */
+/* Compile a wildcard - must not yet be compiled */
 static relpRetVal
 relpTcpPermittedPeerWildcardCompile(tcpPermittedPeerEntry_t *pEtry)
 {
@@ -831,6 +974,7 @@ finalize_it:
 	LEAVE_RELPFUNC;
 }
 
+#ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION  
 /* check a peer against a wildcard entry. This is a more lengthy
  * operation.
  */
@@ -905,7 +1049,7 @@ relpTcpChkOnePeerWildcard(tcpPermittedPeerWildcardComp_t *pRoot, char *peername,
 	 * empty. That happens frequently if the domain root (e.g. "example.com.")
 	 * is properly given.
 	 */
-	if(pWildcard->wildcardType == tcpPEER_WILDCARD_EMPTY_COMPONENT)
+	if(pWildcard != NULL && pWildcard->wildcardType == tcpPEER_WILDCARD_EMPTY_COMPONENT)
 		pWildcard = pWildcard->pNext;
 
 	if(pWildcard != NULL) {
@@ -939,6 +1083,8 @@ relpTcpChkOnePeerName(relpTcp_t *pThis, char *peername, int *pbFoundPositiveMatc
 		} else {
 			relpTcpChkOnePeerWildcard(pThis->permittedPeers.peer[i].wildcardRoot,
 			        peername, pbFoundPositiveMatch);
+			if (*pbFoundPositiveMatch)
+				break;
 		}
 	}
 }
@@ -955,7 +1101,7 @@ relpTcpChkOnePeerName(relpTcp_t *pThis, char *peername, int *pbFoundPositiveMatc
  * Note that non-0 is also returned if no CN is found.
  */
 static int
-relpTcpGetCN(relpTcp_t *pThis, gnutls_x509_crt cert, char *namebuf, int lenNamebuf)
+relpTcpGetCN(relpTcp_t *pThis, gnutls_x509_crt_t cert, char *namebuf, int lenNamebuf)
 {
 	int r;
 	int gnuRet;
@@ -1014,7 +1160,7 @@ done:
 
 /* Check the peer's ID in name auth mode. */
 static int
-relpTcpChkPeerName(relpTcp_t *pThis, gnutls_x509_crt cert)
+relpTcpChkPeerName(relpTcp_t *pThis, gnutls_x509_crt_t cert)
 {
 	int r = 0;
 	int ret;
@@ -1088,9 +1234,9 @@ relpTcpVerifyCertificateCallback(gnutls_session_t session)
 {
 	int r = 0;
 	relpTcp_t *pThis;
-	const gnutls_datum *cert_list;
+	const gnutls_datum_t *cert_list;
 	unsigned int list_size = 0;
-	gnutls_x509_crt cert;
+	gnutls_x509_crt_t cert;
 	int bMustDeinitCert = 0;
 
 	pThis = (relpTcp_t*) gnutls_session_get_ptr(session);
@@ -1132,6 +1278,7 @@ done:
 		gnutls_x509_crt_deinit(cert);
 	return r;
 }
+#endif /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION */
 
 #if 0 /* enable if needed for debugging */
 static void logFunction(int level, const char *msg)
@@ -1149,6 +1296,10 @@ relpTcpLstnInitTLS(relpTcp_t *pThis)
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
 
+	#if GNUTLS_VERSION_NUMBER <= 0x020b00
+	/* gcry_control must be called first, so that the thread system is correctly set up */
+	gcry_control (GCRYCTL_SET_THREAD_CBS, &gcry_threads_pthread);
+	#endif
 	gnutls_global_init();
 	/* uncomment for (very intense) debug help
 	 * gnutls_global_set_log_function(logFunction);
@@ -1170,6 +1321,7 @@ relpTcpLstnInitTLS(relpTcp_t *pThis)
 		}
 		gnutls_anon_set_server_dh_params(pThis->anoncredSrv, pThis->dh_params);
 	} else {
+#		ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION  
 		r = gnutls_certificate_allocate_credentials(&pThis->xcred);
 		if(chkGnutlsCode(pThis, "Failed to allocate certificate credentials", RELP_RET_ERR_TLS_SETUP, r)) {
 			ABORT_FINALIZE(RELP_RET_ERR_TLS_SETUP);
@@ -1191,10 +1343,14 @@ relpTcpLstnInitTLS(relpTcp_t *pThis)
 		if(pThis->authmode == eRelpAuthMode_None)
 			pThis->authmode = eRelpAuthMode_Fingerprint;
 		gnutls_certificate_set_verify_function(pThis->xcred, relpTcpVerifyCertificateCallback);
+#		else /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION   */
+		ABORT_FINALIZE(RELP_RET_ERR_NO_TLS_AUTH);
+#		endif /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION   */
 	}
 finalize_it:
 	LEAVE_RELPFUNC;
 }
+#endif /* #ifdef ENABLE_TLS */
 
 
 /* initialize the tcp socket for a listner
@@ -1284,16 +1440,22 @@ relpTcpLstnInit(relpTcp_t *pThis, unsigned char *pLstnPort, int ai_family)
 			continue;
 		}
 
+#ifdef ENABLE_TLS
 		if(pThis->bEnableTLS) {
 			CHKRet(relpTcpLstnInitTLS(pThis));
 		}
+#endif /* #ifdef ENABLE_TLS */
 
 	        if( (bind(*s, r->ai_addr, r->ai_addrlen) < 0)
 #ifndef IPV6_V6ONLY
 		     && (errno != EADDRINUSE)
 #endif
 	           ) {
-                        pThis->pEngine->dbgprint("error %d while binding relp tcp socket", errno);
+			char msgbuf[4096];
+			snprintf(msgbuf, sizeof(msgbuf), "error while binding relp tcp socket "
+				 "on port '%s'", pLstnPort);
+			msgbuf[sizeof(msgbuf)-1] = '\0';
+			callOnErr(pThis, msgbuf, errno);
                 	close(*s);
 			*s = -1;
                         continue;
@@ -1349,10 +1511,11 @@ finalize_it:
 relpRetVal
 relpTcpRcv(relpTcp_t *pThis, relpOctet_t *pRcvBuf, ssize_t *pLenBuf)
 {
-	int r;
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
 
+#ifdef ENABLE_TLS
+	int r;
 	if(pThis->bEnableTLS) {
 		r = gnutls_record_recv(pThis->session, pRcvBuf, *pLenBuf);
 		if(r == GNUTLS_E_INTERRUPTED || r == GNUTLS_E_AGAIN) {
@@ -1365,8 +1528,13 @@ relpTcpRcv(relpTcp_t *pThis, relpOctet_t *pRcvBuf, ssize_t *pLenBuf)
 		}
 		*pLenBuf = (r < 0) ? -1 : r;
 	} else {
+#endif /* #ifdef ENABLE_TLS */
 		*pLenBuf = recv(pThis->sock, pRcvBuf, *pLenBuf, MSG_DONTWAIT);
+		pThis->pEngine->dbgprint("relpTcpRcv: read %zd bytes from sock %d\n",
+			*pLenBuf, pThis->sock);
+#ifdef ENABLE_TLS
 	}
+#endif /* #ifdef ENABLE_TLS */
 
 	LEAVE_RELPFUNC;
 }
@@ -1418,6 +1586,7 @@ relpTcpSend(relpTcp_t *pThis, relpOctet_t *pBuf, ssize_t *pLenBuf)
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
 
+#ifdef ENABLE_TLS
 	if(pThis->bEnableTLS) {
 		written = gnutls_record_send(pThis->session, pBuf, *pLenBuf);
 		pThis->pEngine->dbgprint("librelp: TLS send returned %d\n", (int) written);
@@ -1432,9 +1601,13 @@ relpTcpSend(relpTcp_t *pThis, relpOctet_t *pBuf, ssize_t *pLenBuf)
 			}
 		}
 	} else {
+#endif /* #ifdef ENABLE_TLS */
 		written = send(pThis->sock, pBuf, *pLenBuf, 0);
+		const int errno_save = errno;
+		pThis->pEngine->dbgprint("relpTcpSend: sock %d, lenbuf %zd, send returned %d [errno %d]\n",
+			(int)pThis->sock, *pLenBuf, (int) written, errno_save);
 		if(written == -1) {
-			switch(errno) {
+			switch(errno_save) {
 				case EAGAIN:
 				case EINTR:
 					/* this is fine, just retry... */
@@ -1445,13 +1618,19 @@ relpTcpSend(relpTcp_t *pThis, relpOctet_t *pBuf, ssize_t *pLenBuf)
 					break;
 			}
 		}
+#ifdef ENABLE_TLS
 	}
+#endif /* #ifdef ENABLE_TLS */
 
 	*pLenBuf = written;
 finalize_it:
 	LEAVE_RELPFUNC;
 }
 
+#ifdef ENABLE_TLS
+#pragma GCC diagnostic push /* we need to disable a warning below */
+/* per https://lists.gnupg.org/pipermail/gnutls-help/2004-August/000154.html This is expected */
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
 /* this is only called for client-initiated sessions */
 static relpRetVal
 relpTcpConnectTLSInit(relpTcp_t *pThis)
@@ -1461,7 +1640,22 @@ relpTcpConnectTLSInit(relpTcp_t *pThis)
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
 
+	/* We expect a non blocking socket to establish a tls session */
+	if((sockflags = fcntl(pThis->sock, F_GETFL)) != -1) {
+		sockflags &= ~O_NONBLOCK;
+		sockflags = fcntl(pThis->sock, F_SETFL, sockflags);
+	}
+
+	if(sockflags == -1) {
+		pThis->pEngine->dbgprint("error %d unsetting fcntl(O_NONBLOCK) on relp socket", errno);
+		ABORT_FINALIZE(RELP_RET_IO_ERR);
+	}
+
 	if(!called_gnutls_global_init) {
+		#if GNUTLS_VERSION_NUMBER <= 0x020b00
+		/* gcry_control must be called first, so that the thread system is correctly set up */
+		gcry_control (GCRYCTL_SET_THREAD_CBS, &gcry_threads_pthread);
+		#endif
 		gnutls_global_init();
 		/* uncomment for (very intense) debug help
 		 * gnutls_global_set_log_function(logFunction);
@@ -1489,6 +1683,7 @@ relpTcpConnectTLSInit(relpTcp_t *pThis)
 			ABORT_FINALIZE(RELP_RET_ERR_TLS_SETUP);
 		}
 	} else {
+#		ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION  
 		r = gnutls_certificate_allocate_credentials(&pThis->xcred);
 		if(chkGnutlsCode(pThis, "Failed to allocate certificate credentials", RELP_RET_ERR_TLS_SETUP, r)) {
 			ABORT_FINALIZE(RELP_RET_ERR_TLS_SETUP);
@@ -1516,6 +1711,9 @@ relpTcpConnectTLSInit(relpTcp_t *pThis)
 		if(pThis->authmode == eRelpAuthMode_None)
 			pThis->authmode = eRelpAuthMode_Fingerprint;
 		gnutls_certificate_set_verify_function(pThis->xcred, relpTcpVerifyCertificateCallback);
+#		else /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION   */
+		ABORT_FINALIZE(RELP_RET_ERR_NO_TLS_AUTH);
+#		endif /* #ifdef HAVE_GNUTLS_CERTIFICATE_SET_VERIFY_FUNCTION   */
 	}
 
 	gnutls_transport_set_ptr(pThis->session, (gnutls_transport_ptr_t) pThis->sock);
@@ -1546,6 +1744,8 @@ relpTcpConnectTLSInit(relpTcp_t *pThis)
 finalize_it:
 	LEAVE_RELPFUNC;
 }
+#pragma GCC diagnostic pop
+#endif /* #ifdef ENABLE_TLS */
 
 /* open a connection to a remote host (server).
  * This is only use for client initiated connections.
@@ -1557,6 +1757,7 @@ relpTcpConnect(relpTcp_t *pThis, int family, unsigned char *port, unsigned char 
 	struct addrinfo *res = NULL;
 	struct addrinfo hints;
 	struct addrinfo *reslocal = NULL;
+	struct pollfd pfd;
 
 	ENTER_RELPFUNC;
 	RELPOBJ_assert(pThis, Tcp);
@@ -1586,14 +1787,33 @@ relpTcpConnect(relpTcp_t *pThis, int family, unsigned char *port, unsigned char 
 		}
 	}
 
-	if(connect(pThis->sock, res->ai_addr, res->ai_addrlen) != 0) {
+	fcntl(pThis->sock, F_SETFL, O_NONBLOCK);
+	connect(pThis->sock, res->ai_addr, res->ai_addrlen);
+
+	pfd.fd = pThis->sock;
+	pfd.events = POLLOUT;
+
+	if (poll(&pfd, 1, pThis->connTimeout * 1000) != 1) {
+		pThis->pEngine->dbgprint("connection timed out after %d seconds\n", pThis->connTimeout);
+		ABORT_FINALIZE(RELP_RET_TIMED_OUT);
+	}
+
+	int so_error;
+	socklen_t len = sizeof so_error;
+
+	getsockopt(pThis->sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+	if (so_error != 0) {
+		pThis->pEngine->dbgprint("socket has an error %d\n", so_error);
 		ABORT_FINALIZE(RELP_RET_IO_ERR);
 	}
 
+
+#ifdef ENABLE_TLS
 	if(pThis->bEnableTLS) {
 		CHKRet(relpTcpConnectTLSInit(pThis));
 		pThis->bTLSActive = 1;
 	}
+#endif /* #ifdef ENABLE_TLS */
 
 finalize_it:
 	if(res != NULL)
@@ -1611,6 +1831,7 @@ finalize_it:
 	LEAVE_RELPFUNC;
 }
 
+#ifdef ENABLE_TLS
 /* return direction in which retry must be done. We return the original
  * gnutls code, which means:
  * "0 if trying to read data, 1 if trying to write data."
@@ -1642,6 +1863,7 @@ relpTcpRtryHandshake(relpTcp_t *pThis)
 finalize_it:
 	LEAVE_RELPFUNC;
 }
+#endif /* #ifdef ENABLE_TLS */
 
 
 /* wait until a socket is writable again. This is primarily for use in client cases.
@@ -1650,29 +1872,24 @@ finalize_it:
  * otherwise.
  */
 int
-relpTcpWaitWriteable(relpTcp_t *pThis, struct timespec *tTimeout)
+relpTcpWaitWriteable(relpTcp_t *const pThis, struct timespec *const tTimeout)
 {
 	int r;
-	fd_set writefds;
 	struct timespec tCurr; /* current time */
-	struct timeval tvSelect;
+	struct pollfd pfd;
 
 	clock_gettime(CLOCK_REALTIME, &tCurr);
-	tvSelect.tv_sec = tTimeout->tv_sec - tCurr.tv_sec;
-	tvSelect.tv_usec = (tTimeout->tv_nsec - tCurr.tv_nsec) / 1000000;
-	if(tvSelect.tv_usec < 0) {
-		tvSelect.tv_usec += 1000000;
-		tvSelect.tv_sec--;
-	}
-	if(tvSelect.tv_sec < 0) {
+	const int timeout =   (tTimeout->tv_sec - tCurr.tv_sec) * 1000
+			    + (tTimeout->tv_nsec - tCurr.tv_nsec) / 1000000000;
+	if(timeout < 0) {
 		r = 0; goto done;
 	}
 
-	FD_ZERO(&writefds);
-	FD_SET(pThis->sock, &writefds);
-	pThis->pEngine->dbgprint("librelp: telpTcpWaitWritable doing select() "
-		"on fd %d, timoeut %lld.%lld\n", pThis->sock,
-		(long long) tTimeout->tv_sec, (long long) tTimeout->tv_nsec);
-	r = select(pThis->sock+1, NULL, &writefds, NULL, &tvSelect);
+	pThis->pEngine->dbgprint("librelp: telpTcpWaitWritable doing poll() "
+		"on fd %d, timoeut %d\n", pThis->sock, timeout);
+
+	pfd.fd = pThis->sock;
+	pfd.events = POLLOUT;
+	r = poll(&pfd, 1, timeout);
 done:	return r;
 }

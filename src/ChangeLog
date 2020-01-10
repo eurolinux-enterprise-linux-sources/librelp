@@ -1,4 +1,144 @@
 ----------------------------------------------------------------------
+Version 1.2.12 - 2016-07-07
+- API enhancement: permit to set connection timeout
+  Thanks to Nathan Brown for the patch.
+- cleanup: replace deprecated GnuTLS data types by current ones
+- CI improvements: added dynamic tests
+  we now use the rsyslog testbench to do dynamic librelp tests. This
+  currently happens only under Travis CI.
+----------------------------------------------------------------------
+Version 1.2.11 - 2016-06-22
+- bugfix: do not accept more than one "open" verb on a connection
+  closes https://github.com/rsyslog/librelp/issues/37
+- bugfix: potential segfault when high-numbered fd is used in sender
+  When a fd (socket) with value >= 1024 was used by the client sender
+  process, the library could segfault in select(). This depended a bit
+  on the platform.
+  This patch solves the issue by replacing the select() call with
+  poll(). Note that we do not changed to epoll(), because
+  (a) we only wait on a single fd
+  (b) poll() is more portable
+  closes https://github.com/rsyslog/librelp/issues/38
+- bugfix: make librelp not run in thight loop when out of sockets
+  If the process can no longer accept new connections (via accept)
+  because it has reached its file handle maximum, librelp runs in
+  a thight loop until either the client connection request is aborted
+  or a file handle becomes available.
+  This happens due to the fact that we get event notifications on
+  connection requests. As we can't satisfy it, we librelp always
+  retries. Unfortunately, there is no socket call to cancel a
+  connection request, so we cannot push the client request out.
+  An alternative solution would be to close and re-open the
+  listening socket, but in that case it is uncertain if we ever can
+  re-aquire a socket (an easy DoS). So the best thing we can
+  probably do is delay retries a bit. We must be careful, however,
+  not to use a too long delay, as that would also affect other
+  connections. We could address that problem via a dedicated thread
+  for the listening process, but librelp is designed so that it can
+  be used by callers with any threading library and threading model,
+  and that would violate this design principle.
+  Judging the alternatives, a slight delay probably is the best
+  solution, especially as the situation is uncommon and will hopefully
+  not last too long. This patch implements that solution.
+  closes https://github.com/rsyslog/librelp/issues/34
+- bugfix: flush the current recv frame if it exists if the client
+  session is restarting
+  Thanks to Nate Brown for the patch.
+- API enhancement: add configurable connection timeout
+  Thanks to Nate Brown for the patch.
+----------------------------------------------------------------------
+Version 1.2.10 - 2016-03-30
+- make compatible with older versions of GnuTLS which require
+  libgcrypt
+- improve example sender/receiver code
+  Thanks to Chris Pilkington for the patches.
+- bugfix: Send full buffers after connection re-establishing
+  When sending large buffers it's possible that only part of buffer data
+  will be transferred before connection is closed. Then on connection
+  re-establishing librelp thinks part of buffer is already sent and
+  transfers only remaining part. Remote side then is not be able to parse
+  such message and always closes the connection.
+  Thanks to github user cellscape for the patch.
+----------------------------------------------------------------------
+Version 1.2.9 - 2015-12-15
+- bugfix: Ignoring return status when handling syslog frames now.
+  Otherwise valid messages in the frame buffer will get lost when the 
+  remote connection is closed during meantime.
+- build bugfix: GnuTLS header was required even if TLS was turned off
+  Thanks to Pedro Alvarez Piedehierro for the patch.
+- bugfix: correct wrong assert() calls [debug mode only affected]
+----------------------------------------------------------------------
+Version 1.2.8 - 2014-09-07
+- bugfix: segfault if KEEPALIVE is used
+  Thanks to Tomas Heinrich for the patch.
+----------------------------------------------------------------------
+Version 1.2.7 - 2014-04-29
+- bugfix: librelp was incompatible with C++ without a real reason
+  Thanks to Ivan Kryak for the patch
+- bugfix: potential misadressing in wildcard match
+  see: https://github.com/rsyslog/librelp/pull/3
+  Thanks to Sebastian Schmidt for the patch.
+- bugfix: always last wildcard match was reported, not first
+  see: https://github.com/rsyslog/librelp/pull/4
+  Thanks to Sebastian Schmidt for the patch.
+----------------------------------------------------------------------
+Version 1.2.6 - 2014-03-20
+- report error when preparing for non-anon TLS and this is unsupported
+  The error is reported when the processes own certificate is set,
+  which also turns off anon TLS. We now check if TLS AUTH is supported
+  and, if not, return an error. This enables better error tracking
+  in the client, as otherwise the problem is reported much later
+  or even not at all (in the case of a relp server).
+----------------------------------------------------------------------
+Version 1.2.5 - 2014-03-20
+- permit to use anonymous TLS on platforms where GnuTLS misses
+  certificate verification function. This permits to use at least
+  anon TLS on platforms like RHEL and CENTOS 6.
+----------------------------------------------------------------------
+Version 1.2.4 - 2014-03-17
+- correct API/ABI change in 1.2.3
+  My reasoning was flawed, and we could run into problems with
+  apps that required the new version but could not detect that an
+  older one was installed.
+  Thanks to Michael Biebl for pointing this out.
+  What we have done is:
+  - revert back to previous state (return void)
+    * relpSrvEnableTLS();
+    * relpSrvEnableTLSZip();
+    These functions are now deprecated.
+  - introduce new functions that return a state
+    * relpSrvEnableTLS2();
+    * relpSrvEnableTLSZip2();
+----------------------------------------------------------------------
+Version 1.2.3 - 2014-03-13
+  ************************************************************
+  * NOTE: this version should NOT be used due to the API     *
+  *       change specified below.                            *
+  ************************************************************
+- add ability to build librelp without TLS
+  This is required on some platforms where GnuTLS is too old 
+  Use --disable-tls to select this mode. If set, RELP_RET_ERR_NO_TLS
+  will be returned on calls that selected TLS mode.
+  See also: https://github.com/rsyslog/librelp/issues/1
+- API change: two functions that used to return void now return state
+  these are:
+  * relpSrvEnableTLS();
+  * relpSrvEnableTLSZip();
+  This change is acceptable because the state must not necessary be
+  evaluated. If not, the same error is returned a bit later in the
+  calling sequence. Having it early, however, may help with better
+  error messages. So it's still optional to check.
+- bugfix: configure required too-old version of GnuTLS
+  This lead to successful builds which later on would not execute.
+----------------------------------------------------------------------
+Version 1.2.2 - 2014-01-07
+- add capability to enable tcp KEEPALIVE
+- introduced new API relpSrvSetKeepAlive() to support KEEPALIVE
+----------------------------------------------------------------------
+Version 1.2.1 - 2013-09-26
+- errors binding listener port are now reported via error message
+  callback
+----------------------------------------------------------------------
 Version 1.2.0 - 2013-07-15
 - support for epoll() added
   platforms that do not support it fall back to select()

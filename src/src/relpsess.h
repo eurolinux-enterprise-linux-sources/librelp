@@ -1,6 +1,6 @@
 /* The RELPSESS object.
  *
- * Copyright 2008-2013 by Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2016 by Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of librelp.
  *
@@ -70,6 +70,7 @@ struct relpSess_s {
 	BEGIN_RELP_OBJ;
 	relpEngine_t *pEngine;
 	relpSessType_t sessType;	/**< session type: 0 - server, 1 - client */
+	int bServerConnOpen;	/**< server part: is connection established? */
 	void *pUsr;		/**< user provided pointer (opaque data) */
 	relpTcp_t *pTcp;	/**< our sockt to the remote peer */
 	struct relpFrame_s *pCurrRcvFrame; /**< the current receive frame (a buffer) */
@@ -105,6 +106,7 @@ struct relpSess_s {
 	int bAutoRetry;	/**< automatically try (once) to reestablish a broken session? */
 	int sizeWindow;	/**< size of our app-level communications window */
 	unsigned timeout; /**< timeout after which session is to be considered broken */
+	int connTimeout; /**< connection timeout */
 	relpSessState_t sessState; /**< state of our session */
 	/* linked list of frames with outstanding "rsp" */
 	relpSessUnacked_t *pUnackedLstRoot;
@@ -144,6 +146,7 @@ relpRetVal relpSessGetUnacked(relpSess_t *pThis, relpSendbuf_t **ppSendbuf, relp
 relpRetVal relpSessTryReestablish(relpSess_t *pThis);
 relpRetVal relpSessSetProtocolVersion(relpSess_t *pThis, int protocolVersion);
 relpRetVal relpSessSetTimeout(relpSess_t *pThis, unsigned timeout);
+relpRetVal relpSessSetConnTimeout(relpSess_t *pThis, int connTimeout);
 relpRetVal relpSessSetWindowSize(relpSess_t *pThis, int sizeWindow);
 relpRetVal relpSessSetClientIP(relpSess_t *pThis, unsigned char *ip);
 relpRetVal relpSessEnableTLS(relpSess_t *pThis);

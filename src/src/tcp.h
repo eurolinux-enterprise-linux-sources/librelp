@@ -34,7 +34,9 @@
 #define	RELPTCP_H_INCLUDED
 
 #include <stdint.h>
-#include <gnutls/gnutls.h>
+#ifdef ENABLE_TLS
+#       include <gnutls/gnutls.h>
+#endif
 #include "relp.h"
 
 typedef enum { relpTCP_RETRY_none = 0,
@@ -102,16 +104,23 @@ typedef struct relpTcp_s {
 	int dhBits;	/**< number of bits for Diffie-Hellman key */
 	char *pristring; /**< priority string for GnuTLS */
 	relpAuthMode_t authmode;
+	int connTimeout;
+#ifdef ENABLE_TLS
 	gnutls_anon_client_credentials_t anoncred;	/**< client anon credentials */
 	gnutls_anon_server_credentials_t anoncredSrv;	/**< server anon credentials */
+#endif
 	tcpPermittedPeers_t permittedPeers;
 	/* GnuTLS certificat support */
+#ifdef ENABLE_TLS
 	gnutls_certificate_credentials_t xcred;		/**< certificate credentials */
+#endif
 	char *caCertFile;
 	char *ownCertFile;
 	char *privKeyFile;
+#ifdef ENABLE_TLS
 	gnutls_session_t session;
 	gnutls_dh_params_t dh_params; /**< server DH parameters for anon mode */
+#endif
 	relpTcpRtryState_t rtryOp;
 } relpTcp_t;
 
@@ -146,6 +155,7 @@ relpRetVal relpTcpSetPrivKey(relpTcp_t *pThis, char *cert);
 relpRetVal relpTcpSetPermittedPeers(relpTcp_t *pThis, relpPermittedPeers_t *pPeers);
 relpRetVal relpTcpRtryHandshake(relpTcp_t *pThis);
 relpRetVal relpTcpSetUsrPtr(relpTcp_t *pThis, void *pUsr);
+relpRetVal relpTcpSetConnTimeout(relpTcp_t *pThis, int connTimeout);
 relpRetVal relpTcpSetAuthMode(relpTcp_t *pThis, relpAuthMode_t authmode);
 void relpTcpHintBurstBegin(relpTcp_t *pThis);
 void relpTcpHintBurstEnd(relpTcp_t *pThis);
